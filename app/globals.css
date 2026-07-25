@@ -1,0 +1,247 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Sponsor Engine design system - "Heritage Packet".
+ * A print-sponsorship-packet look: cream paper, forest green, lime and blue
+ * accents, Fraunces serif display headings, diamond rules, and a green->blue
+ * gradient as the signature motif.
+ * Dark mode is "Evergreen Dark": green-black surfaces, cream text, lime primary.
+ *
+ * Retheme by editing the custom properties below - every surface reads from
+ * them. All feature UIs compose Tailwind utilities + the shadcn/ui components
+ * in components/ui. Do not add per-route CSS files.
+ */
+
+:root {
+  /* Heritage Packet (light) */
+  --background: #f5f6e2;
+  --foreground: #24331f;
+
+  --card: #fdfdf3;
+  --card-foreground: #24331f;
+  --popover: #fdfdf3;
+  --popover-foreground: #24331f;
+
+  --primary: #1e5631;
+  --primary-foreground: #f2f6e4;
+
+  --secondary: #e9edcf;
+  --secondary-foreground: #33531f;
+
+  --muted: #eef0d8;
+  --muted-foreground: #5f6d49;
+
+  --accent: #e3ecc9;
+  --accent-foreground: #1c4d27;
+
+  --destructive: #b3402e;
+  --destructive-foreground: #fdf6f0;
+
+  --border: #dde0c0;
+  --input: #cbd0a6;
+  --ring: #7cb342;
+
+  /* Brand accents */
+  --lime: #7cb342;
+  --lime-foreground: #1c3311;
+  --info: #2e6fb0;
+  --info-foreground: #eef4fb;
+  --gradient-from: #4c8c2b;
+  --gradient-to: #1f5c99;
+
+  /* Tier hues */
+  --tier-silver-bg: #e3e5e8;
+  --tier-silver-fg: #4d5560;
+  --tier-gold-bg: #f3e3b8;
+  --tier-gold-fg: #8a6a1d;
+  --tier-platinum-bg: #dfe7f2;
+  --tier-platinum-fg: #33547e;
+
+  --chart-1: #1e5631;
+  --chart-2: #7cb342;
+  --chart-3: #2e6fb0;
+  --chart-4: #4c8c2b;
+  --chart-5: #8a6a1d;
+
+  --sidebar: #edf0d3;
+  --sidebar-foreground: #24331f;
+  --sidebar-primary: #1e5631;
+  --sidebar-primary-foreground: #f2f6e4;
+  --sidebar-accent: #e0e6bd;
+  --sidebar-accent-foreground: #1c4d27;
+  --sidebar-border: #dbdfba;
+  --sidebar-ring: #7cb342;
+
+  --radius: 0.75rem;
+}
+
+.dark {
+  /* Evergreen Dark */
+  --background: #0d1410;
+  --foreground: #e9eedb;
+
+  --card: #16211a;
+  --card-foreground: #e9eedb;
+  --popover: #131c16;
+  --popover-foreground: #e9eedb;
+
+  --primary: #8dc63f;
+  --primary-foreground: #10230c;
+
+  --secondary: #1c2a20;
+  --secondary-foreground: #cfe0b0;
+
+  --muted: #18241c;
+  --muted-foreground: #8fa08a;
+
+  --accent: #223121;
+  --accent-foreground: #b9e07e;
+
+  --destructive: #e2664f;
+  --destructive-foreground: #1c0d09;
+
+  --border: #263528;
+  --input: #2f4132;
+  --ring: #8dc63f;
+
+  --lime: #8dc63f;
+  --lime-foreground: #10230c;
+  --info: #4a90d9;
+  --info-foreground: #0a1521;
+  --gradient-from: #4c8c2b;
+  --gradient-to: #1f5c99;
+
+  --tier-silver-bg: #33403c;
+  --tier-silver-fg: #b8c4c0;
+  --tier-gold-bg: #46391a;
+  --tier-gold-fg: #e5c877;
+  --tier-platinum-bg: #223549;
+  --tier-platinum-fg: #9dc0e8;
+
+  --chart-1: #8dc63f;
+  --chart-2: #4a90d9;
+  --chart-3: #cfe0b0;
+  --chart-4: #4c8c2b;
+  --chart-5: #e5c877;
+
+  --sidebar: #101a13;
+  --sidebar-foreground: #e9eedb;
+  --sidebar-primary: #8dc63f;
+  --sidebar-primary-foreground: #10230c;
+  --sidebar-accent: #1c2a20;
+  --sidebar-accent-foreground: #b9e07e;
+  --sidebar-border: #223126;
+  --sidebar-ring: #8dc63f;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-lime: var(--lime);
+  --color-lime-foreground: var(--lime-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --font-sans: var(--font-poppins), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-fraunces), Georgia, serif;
+  --font-mono: ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+    outline-color: color-mix(in srgb, var(--color-ring) 50%, transparent);
+    min-width: 0;
+  }
+
+  body {
+    background: var(--color-background);
+    color: var(--color-foreground);
+    /* @theme inline doesn't emit --font-sans at runtime; reference the
+       next/font variable directly. */
+    font-family: var(--font-poppins), ui-sans-serif, system-ui, sans-serif;
+    font-size: 0.9375rem;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--lime) 35%, transparent);
+  }
+}
+
+@layer components {
+  /*
+   * Packet motifs, shared across routes.
+   */
+
+  /* Diamond-capped rule under display headings (packet section-header motif). */
+  .diamond-rule {
+    display: flex;
+    align-items: center;
+    color: var(--color-primary);
+  }
+  .diamond-rule::before,
+  .diamond-rule::after {
+    content: "";
+    width: 7px;
+    height: 7px;
+    flex: none;
+    border: 1.5px solid currentColor;
+    transform: rotate(45deg);
+  }
+  .diamond-rule > span {
+    height: 1.5px;
+    width: 88px;
+    background: currentColor;
+  }
+
+  /* Green->blue packet gradient (footer band of the PDF). */
+  .gradient-brand {
+    background-image: linear-gradient(
+      100deg,
+      var(--gradient-from),
+      var(--gradient-to)
+    );
+  }
+}

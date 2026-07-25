@@ -1,0 +1,16 @@
+{
+  "name": "sponsor-engine-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone Discord bot for Sponsor Engine. Shares the app's SQLite database via better-sqlite3 (WAL). Run separately from the Next.js app.",
+  "type": "module",
+  "scripts": {
+    "bot": "tsx --conditions=react-server bot.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "discord.js": "^14.16.3",
+    "tsx": "^4.22.4",
+    "typescript": "^5"
+  }
+}
