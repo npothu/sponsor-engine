@@ -1,3 +1,4 @@
+import os from "node:os";
 import { loadEnv, readConfig } from "./src/env.js";
 import { setupHelp } from "./src/setup-help.js";
 
@@ -213,9 +214,105 @@ client.once(Events.ClientReady, async (ready) => {
   } else {
     console.log(`Watching ${channelIdSet.size} channel(s) for sponsorship chatter.`);
   }
+  startHeartbeat(ready.user.tag);
   scheduleDailyDigest();
   await registerCommands(ready.user.id);
 });
+
+// ---------------------------------------------------------------------------
+// Heartbeat
+// ---------------------------------------------------------------------------
+
+/**
+ * How often to re-publish the check-in. Comfortably under the app's staleness
+ * window (DISCORD_BOT_HEARTBEAT_STALE_MS), so one missed write is not mistaken
+ * for a stopped bot.
+ */
+const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+
+async function writeHeartbeat(botTag: string): Promise<void> {
+  try {
+    await data.recordBotHeartbeat({
+      botTag,
+      channelCount: channelIdSet.size,
+      guildId: config.guildId,
+      digestChannelId: config.digestChannelId,
+      host: os.hostname(),
+    });
+  } catch (err) {
+    console.error("Failed to write bot heartbeat:", err);
+  }
+}
+
+/**
+ * Publish a check-in to the shared database now, then every few minutes.
+ *
+ * This is how the web app knows the bot exists. Its config lives in
+ * discord-bot/.env on this machine only - a deployed app cannot read that file,
+ * so before the heartbeat the Discord page reported a perfectly healthy bot as
+ * "Not configured". A check-in row in the shared database travels wherever the
+ * app runs.
+ */
+function startHeartbeat(botTag: string): void {
+  void writeHeartbeat(botTag);
+  setInterval(() => void writeHeartbeat(botTag), HEARTBEAT_INTERVAL_MS);
+}
+
+// ---------------------------------------------------------------------------
+// Pause switch
+// ---------------------------------------------------------------------------
+
+/**
+ * How long a pause lookup stays cached. Every visible act (command, capture,
+ * digest) checks the switch, so a short cache keeps a chatty channel from
+ * costing one DB read per message while still noticing an app-side flip within
+ * about half a minute.
+ */
+const PAUSE_CACHE_MS = 30 * 1000;
+
+let pauseCache: { paused: boolean; fetchedAt: number } | null = null;
+
+/**
+ * Whether the app has paused the bot (see lib/discord-bot-control.ts). The
+ * switch lives in the shared database because that is the only channel a
+ * deployed app has to this process. Fails open: a broken read means we act
+ * unpaused rather than going dark on an infrastructure blip - if the DB is
+ * truly down, every command fails loudly on its own anyway.
+ */
+async function isBotPaused(): Promise<boolean> {
+  const now = Date.now();
+  if (pauseCache && now - pauseCache.fetchedAt < PAUSE_CACHE_MS) {
+    return pauseCache.paused;
+  }
+  let paused = false;
+  try {
+    paused = (await data.getBotPause())?.paused ?? false;
+  } catch (err) {
+    console.error("Failed to read the pause switch:", err);
+  }
+  pauseCache = { paused, fetchedAt: now };
+  return paused;
+}
+
+// ---------------------------------------------------------------------------
+// Actor attribution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the Discord user invoking a command to an app user id (see
+ * lib/data.ts getUserIdByDiscordId / scripts/link-discord-user.ts), so /log
+ * and /prospect audit rows attribute to a real person. Falls back to null
+ * (logged as "system / importer" in the audit trail) for an unlinked account
+ * rather than blocking the command.
+ */
+async function resolveActorUserId(discordUserId: string): Promise<number | null> {
+  try {
+    return await data.getUserIdByDiscordId(discordUserId);
+  } catch (err) {
+    console.error("Failed to resolve Discord user to an app account:", err);
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Daily digest push
@@ -235,6 +332,10 @@ function msUntilNextHour(hour: number): number {
 /** Render and post the configured proactive digests to the configured channel. */
 async function postDigest(): Promise<void> {
   if (!config.digestChannelId) return;
+  if (await isBotPaused()) {
+    console.log("Digest skipped - the bot is paused from the app.");
+    return;
+  }
   try {
     const channel = await client.channels.fetch(config.digestChannelId);
     if (!channel || !channel.isTextBased() || !("send" in channel)) {
@@ -289,6 +390,7 @@ client.on(Events.MessageCreate, async (msg) => {
     if (msg.author?.bot) return;
     if (!channelIdSet.has(msg.channelId)) return;
     if (!msg.content) return;
+    if (await isBotPaused()) return;
     await data.insertDiscordInboxMessages([toInboxInput(msg)]);
   } catch (err) {
     console.error("Failed to capture message:", err);
@@ -301,6 +403,18 @@ client.on(Events.MessageCreate, async (msg) => {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    if (await isBotPaused()) {
+      if (interaction.isAutocomplete()) {
+        await interaction.respond([]);
+      } else if (interaction.isRepliable()) {
+        await interaction.reply({
+          content:
+            "The bot is paused from the Sponsor Engine app. Resume it on the Discord page there to use commands.",
+          flags: MessageFlags.Ephemeral,
+        });
+      }
+      return;
+    }
     if (interaction.isAutocomplete()) {
       await handleAutocomplete(interaction);
       return;
@@ -363,7 +477,8 @@ async function handleCommand(interaction: ChatInputInteraction): Promise<void> {
       const channel = interaction.options.getString("channel", true) as TouchpointChannel;
       const direction = interaction.options.getString("direction", true) as TouchpointDirection;
       const summary = interaction.options.getString("summary");
-      const reply = await runLog(data, { companyId, channel, direction, summary });
+      const actorUserId = await resolveActorUserId(interaction.user.id);
+      const reply = await runLog(data, { companyId, channel, direction, summary }, actorUserId);
       await interaction.reply({ content: reply, flags: MessageFlags.Ephemeral });
       return;
     }
@@ -372,13 +487,18 @@ async function handleCommand(interaction: ChatInputInteraction): Promise<void> {
       const website = interaction.options.getString("website");
       const priority = interaction.options.getString("priority") as CompanyPriority | null;
       const notes = interaction.options.getString("notes");
-      const reply = await runProspect(data, {
-        name,
-        website,
-        priority,
-        notes,
-        addedBy: interaction.user.username,
-      });
+      const actorUserId = await resolveActorUserId(interaction.user.id);
+      const reply = await runProspect(
+        data,
+        {
+          name,
+          website,
+          priority,
+          notes,
+          addedBy: interaction.user.username,
+        },
+        actorUserId,
+      );
       await interaction.reply({ content: reply });
       return;
     }

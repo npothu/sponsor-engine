@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { Fraunces, Poppins } from "next/font/google";
 import "./globals.css";
+import { auth } from "@/auth";
 import { SidebarNav } from "@/components/nav";
 import { QuickLog } from "@/components/quick-log";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -24,11 +25,12 @@ export const metadata: Metadata = {
     "Local-first sponsorship pipeline tracker - pitch, track, and close corporate and community sponsors.",
 };
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const session = await auth();
   return (
     <html lang="en" suppressHydrationWarning>
       <body className={`${fraunces.variable} ${poppins.variable}`}>
@@ -53,7 +55,7 @@ export default function RootLayout({
                 />
               </div>
 
-              <SidebarNav />
+              <SidebarNav role={session?.user?.role} />
 
               <div className="mt-auto px-2 pt-4 text-[11px] font-medium text-muted-foreground">
                 Sponsorship CRM

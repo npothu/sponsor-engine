@@ -561,6 +561,47 @@ ${signature}`,
     },
   ]);
 
+  // LinkedIn outreach cadence (triage "Keep + DM'd" / M key). Step 1 is the
+  // intro DM already sent at assign-time; the engine starts at step 2 (+6d bump).
+  const [linkedinCadence] = await db
+    .insert(cadences)
+    .values({
+      name: "LinkedIn outreach",
+      description:
+        "Cold LinkedIn DM sequence: intro DM (step 1, logged by triage's Keep + DM'd), one bump ~a week later (connection acceptance lags), then switch to email rather than sending a third DM.",
+    })
+    .returning();
+  await db.insert(cadenceSteps).values([
+    {
+      cadenceId: linkedinCadence.id,
+      position: 1,
+      waitDays: 0,
+      channel: "linkedin",
+      note: "intro DM",
+    },
+    {
+      cadenceId: linkedinCadence.id,
+      position: 2,
+      waitDays: 6,
+      channel: "linkedin",
+      note: "one polite bump / check connection accepted",
+    },
+    {
+      cadenceId: linkedinCadence.id,
+      position: 3,
+      waitDays: 7,
+      channel: "email",
+      note: "switch channels: email referencing the DM",
+    },
+    {
+      cadenceId: linkedinCadence.id,
+      position: 4,
+      waitDays: 8,
+      channel: "email",
+      note: "final follow-up",
+    },
+  ]);
+
   // Deliverable templates for the freshly created active tiers.
   await seedDeliverableTemplates();
 

@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Git worktrees live under .claude/worktrees/. Linting them re-reports every
+    // stale branch's problems against this checkout, which buried the handful of
+    // real findings under thousands of duplicates.
+    ".claude/**",
   ]),
 ]);
 

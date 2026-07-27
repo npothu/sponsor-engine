@@ -10,7 +10,6 @@ import {
   listTemplates,
 } from "@/lib/data";
 import { ACTIVE_STAGES } from "@/lib/data";
-import type { DealStage } from "@/lib/schema";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CompanyHeader } from "./company-header";
 import { DealPanel } from "./deal-panel";
@@ -20,6 +19,7 @@ import { TimelineSection } from "./timeline-section";
 import { ActionsSection } from "./actions-section";
 import { NotesSection } from "./notes-section";
 import { AddDealForm } from "./add-deal-form";
+import { OtherCycles } from "./other-cycles";
 
 /**
  * /companies/[id] - the company profile. The single most important screen in
@@ -125,7 +125,11 @@ export default async function CompanyProfilePage({
           />
 
           {deals.length > 1 && (
-            <OtherDeals deals={deals} primaryId={primaryDeal?.id} />
+            <OtherCycles
+              companyId={companyId}
+              deals={deals}
+              primaryId={primaryDeal?.id}
+            />
           )}
 
           {primaryDeal && (
@@ -139,35 +143,4 @@ export default async function CompanyProfilePage({
       </div>
     </div>
   );
-}
-
-function OtherDeals({
-  deals,
-  primaryId,
-}: {
-  deals: { id: number; cycle: string; stage: string }[];
-  primaryId?: number;
-}) {
-  const others = deals.filter((d) => d.id !== primaryId);
-  if (others.length === 0) return null;
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Other cycles</CardTitle>
-      </CardHeader>
-      <CardContent className="grid gap-2">
-        {others.map((d) => (
-          <div key={d.id} className="flex justify-between text-sm">
-            <span>{d.cycle}</span>
-            <span className="text-muted-foreground">{stageLabel(d.stage)}</span>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-function stageLabel(stage: string): string {
-  const s = stage as DealStage;
-  return s.charAt(0).toUpperCase() + s.slice(1);
 }

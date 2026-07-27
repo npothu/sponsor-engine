@@ -10,7 +10,10 @@ import {
   templates,
   type AuditAction,
   type CadenceStep,
+  type TouchpointChannel,
 } from "./schema";
+
+type CadenceDb = Pick<typeof db, "select" | "insert" | "update">;
 
 /**
  * Cadence progression engine.
@@ -45,9 +48,10 @@ async function logAudit(
   rowId: string | number,
   action: AuditAction,
   state: unknown,
+  executor: CadenceDb = db,
 ): Promise<void> {
   const json = state == null ? null : JSON.stringify(state);
-  await db.insert(auditLog).values({
+  await executor.insert(auditLog).values({
     userId: actorUserId,
     tableName,
     rowId: String(rowId),
@@ -58,8 +62,11 @@ async function logAudit(
 }
 
 /** Steps of a cadence in ascending position order. */
-async function stepsForCadence(cadenceId: number): Promise<CadenceStep[]> {
-  return await db
+async function stepsForCadence(
+  cadenceId: number,
+  executor: CadenceDb,
+): Promise<CadenceStep[]> {
+  return await executor
     .select()
     .from(cadenceSteps)
     .where(eq(cadenceSteps.cadenceId, cadenceId))
@@ -68,8 +75,11 @@ async function stepsForCadence(cadenceId: number): Promise<CadenceStep[]> {
 }
 
 /** Open next actions on a deal that were created by the cadence engine. */
-async function openCadenceActionIds(dealId: number): Promise<number[]> {
-  return (await db
+async function openCadenceActionIds(
+  dealId: number,
+  executor: CadenceDb,
+): Promise<number[]> {
+  return (await executor
     .select({ id: nextActions.id })
     .from(nextActions)
     .where(
@@ -84,11 +94,15 @@ async function openCadenceActionIds(dealId: number): Promise<number[]> {
 }
 
 /** Build a human-readable action title for a cadence step. */
-async function stepTitle(step: CadenceStep, ordinal: number): Promise<string> {
+async function stepTitle(
+  step: CadenceStep,
+  ordinal: number,
+  executor: CadenceDb,
+): Promise<string> {
   const channelLabel = step.channel.replace(/_/g, " ");
   let title = `Cadence step ${ordinal}: ${channelLabel} follow-up`;
   if (step.templateId != null) {
-    const template = await db
+    const template = await executor
       .select({ name: templates.name })
       .from(templates)
       .where(eq(templates.id, step.templateId))
@@ -116,42 +130,72 @@ export async function advanceCadenceAfterTouchpoint(
   dealId: number,
   direction: "outbound" | "inbound",
   actorUserId: number | null = null,
+  channel?: TouchpointChannel,
+  executor: CadenceDb = db,
 ): Promise<void> {
-  const deal = await db.select().from(deals).where(eq(deals.id, dealId)).get();
+  const deal = await executor
+    .select()
+    .from(deals)
+    .where(eq(deals.id, dealId))
+    .get();
   if (!deal || deal.cadenceId == null) return;
 
   if (direction === "inbound") {
-    const openIds = await openCadenceActionIds(dealId);
+    const openIds = await openCadenceActionIds(dealId, executor);
     const now = nowIso();
     for (const id of openIds) {
-      const row = await db.update(nextActions)
+      const row = await executor
+        .update(nextActions)
         .set({ status: "done", doneAt: now })
         .where(eq(nextActions.id, id))
         .returning()
         .get();
-      if (row) await logAudit(actorUserId, "next_actions", row.id, "update", row);
+      if (row) {
+        await logAudit(
+          actorUserId,
+          "next_actions",
+          row.id,
+          "update",
+          row,
+          executor,
+        );
+      }
     }
     // Detach the cadence: the human now drives follow-up manually.
-    const detachedDeal = await db.update(deals)
+    const detachedDeal = await executor
+      .update(deals)
       .set({ cadenceId: null, cadenceStepIndex: 0 })
       .where(eq(deals.id, dealId))
       .returning()
       .get();
     if (detachedDeal) {
-      await logAudit(actorUserId, "deals", detachedDeal.id, "update", detachedDeal);
+      await logAudit(
+        actorUserId,
+        "deals",
+        detachedDeal.id,
+        "update",
+        detachedDeal,
+        executor,
+      );
     }
     return;
   }
 
   // Outbound. Do not stack duplicate cadence follow-ups.
-  if ((await openCadenceActionIds(dealId)).length > 0) return;
+  if ((await openCadenceActionIds(dealId, executor)).length > 0) return;
 
-  const steps = await stepsForCadence(deal.cadenceId);
+  const steps = await stepsForCadence(deal.cadenceId, executor);
   const index = deal.cadenceStepIndex;
+
+  // A LinkedIn touch must not consume an email cadence step (or vice versa).
+  // At index 0 the touch kicks off step 1; later, it completes the previously
+  // scheduled step at index - 1 before the engine schedules the next one.
+  const completedStep = steps[index === 0 ? 0 : index - 1];
+  if (channel && completedStep && completedStep.channel !== channel) return;
 
   if (index >= steps.length) {
     // Steps exhausted - schedule a one-time manual review, once.
-    const exhausted = await db
+    const exhausted = await executor
       .select({ id: nextActions.id })
       .from(nextActions)
       .where(
@@ -162,7 +206,8 @@ export async function advanceCadenceAfterTouchpoint(
       )
       .get();
     if (!exhausted) {
-      const row = await db.insert(nextActions)
+      const row = await executor
+        .insert(nextActions)
         .values({
           dealId,
           title: EXHAUSTED_TITLE,
@@ -172,7 +217,14 @@ export async function advanceCadenceAfterTouchpoint(
         })
         .returning()
         .get();
-      await logAudit(actorUserId, "next_actions", row.id, "insert", row);
+      await logAudit(
+        actorUserId,
+        "next_actions",
+        row.id,
+        "insert",
+        row,
+        executor,
+      );
     }
     return;
   }
@@ -182,24 +234,40 @@ export async function advanceCadenceAfterTouchpoint(
     representation: "date",
   });
 
-  const row = await db.insert(nextActions)
+  const row = await executor
+    .insert(nextActions)
     .values({
       dealId,
-      title: await stepTitle(step, index + 1),
+      title: await stepTitle(step, index + 1, executor),
       dueDate,
       status: "open",
       createdBy: CADENCE_CREATED,
     })
     .returning()
     .get();
-  await logAudit(actorUserId, "next_actions", row.id, "insert", row);
+  await logAudit(
+    actorUserId,
+    "next_actions",
+    row.id,
+    "insert",
+    row,
+    executor,
+  );
 
-  const advancedDeal = await db.update(deals)
+  const advancedDeal = await executor
+    .update(deals)
     .set({ cadenceStepIndex: index + 1 })
     .where(eq(deals.id, dealId))
     .returning()
     .get();
   if (advancedDeal) {
-    await logAudit(actorUserId, "deals", advancedDeal.id, "update", advancedDeal);
+    await logAudit(
+      actorUserId,
+      "deals",
+      advancedDeal.id,
+      "update",
+      advancedDeal,
+      executor,
+    );
   }
 }

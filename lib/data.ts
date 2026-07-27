@@ -1,5 +1,5 @@
 import "server-only";
-import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   addDays,
   differenceInCalendarDays,
@@ -9,6 +9,16 @@ import {
 } from "date-fns";
 import { db, ensureMigrated } from "./db";
 import { advanceCadenceAfterTouchpoint } from "./cadence";
+import {
+  DISCORD_BOT_HEARTBEAT_KEY,
+  parseBotHeartbeat,
+  type BotHeartbeat,
+} from "./discord-bot-heartbeat";
+import {
+  DISCORD_BOT_PAUSE_KEY,
+  parseBotPause,
+  type BotPause,
+} from "./discord-bot-control";
 
 // Kicks off the (memoized, in lib/db.ts) schema migration on module load.
 // Deliberately not a top-level `await`: standalone scripts run via tsx treat
@@ -24,12 +34,19 @@ import {
   normalizeHost,
 } from "@/app/prospects/dedupe";
 import {
+  contactInboxDedupeKey,
+  normalizeRejectReason,
+  suggestTriage,
+  type ScrapedPerson,
+} from "./contact-inbox";
+import {
   addons,
   auditLog,
   cadences,
   cadenceSteps,
   companies,
   companySignals,
+  contactInbox,
   contacts,
   cycles,
   dealAddons,
@@ -57,6 +74,8 @@ import {
   type CompanyType,
   type Contact,
   type ContactCategory,
+  type ContactInboxRow,
+  type ContactInboxStatus,
   type ContactType,
   type ContactWarmth,
   type Cycle,
@@ -72,6 +91,7 @@ import {
   type DiscordInboxStatus,
   type EmailStatus,
   type ImportRun,
+  type LinkedinTouchType,
   type NewDiscordInboxMessage,
   type Setting,
   type NextAction,
@@ -84,6 +104,11 @@ import {
   type User,
   type UserRole,
 } from "./schema";
+
+type DataExecutor = Pick<
+  typeof db,
+  "select" | "insert" | "update" | "delete"
+>;
 
 /**
  * lib/data.ts - the shared, typed, server-only data-access layer.
@@ -1088,7 +1113,7 @@ export async function armNextActionForStage(
     })
     .returning()
     .get();
-  await logAudit(actorUserId, "next_actions", row.id, "insert", row);
+  await logAudit(actorUserId, "next_actions", row.id, "insert", row, tx);
 }
 
 /**
@@ -1113,13 +1138,13 @@ export async function recordStageEvent(
     .values({ dealId, fromStage: fromStage ?? null, toStage, enteredAt: at })
     .returning()
     .get();
-  await logAudit(actorUserId, "stage_events", row.id, "insert", row);
+  await logAudit(actorUserId, "stage_events", row.id, "insert", row, tx);
 }
 
 /**
- * Hard-delete a prospect-stage deal and its dependent rows (next_actions,
- * stage_events). Only removes the deal when it is still at the prospect stage -
- * active pipeline deals are never deleted here.
+ * Hard-delete a prospect-stage deal and its dependent rows. Only removes the
+ * deal when it is still at the prospect stage - active pipeline deals are never
+ * deleted here. Company-page cycle removal uses removeDealFromCycle instead.
  */
 export async function removeDeal(
   dealId: number,
@@ -1127,6 +1152,28 @@ export async function removeDeal(
 ): Promise<void> {
   const deal = await db.select().from(deals).where(eq(deals.id, dealId)).get();
   if (!deal || deal.stage !== "prospect") return;
+  await deleteDealAndDependents(deal, actorUserId);
+}
+
+/**
+ * Hard-delete a company's deal for a cycle regardless of stage (company profile
+ * "remove from cycle"). Cascades next_actions, stage_events, deal_addons, and
+ * deal_deliverables; touchpoints stay on the company with deal_id cleared.
+ */
+export async function removeDealFromCycle(
+  dealId: number,
+  actorUserId: number | null = null,
+): Promise<void> {
+  const deal = await db.select().from(deals).where(eq(deals.id, dealId)).get();
+  if (!deal) return;
+  await deleteDealAndDependents(deal, actorUserId);
+}
+
+async function deleteDealAndDependents(
+  deal: typeof deals.$inferSelect,
+  actorUserId: number | null,
+): Promise<void> {
+  const dealId = deal.id;
 
   const actionsToDelete = await db
     .select()
@@ -1146,6 +1193,53 @@ export async function removeDeal(
   await db.delete(stageEvents).where(eq(stageEvents.dealId, dealId)).run();
   for (const e of eventsToDelete) {
     await logAudit(actorUserId, "stage_events", e.id, "delete", e);
+  }
+
+  const addonsToDelete = await db
+    .select()
+    .from(dealAddons)
+    .where(eq(dealAddons.dealId, dealId))
+    .all();
+  await db.delete(dealAddons).where(eq(dealAddons.dealId, dealId)).run();
+  for (const a of addonsToDelete) {
+    await logAudit(
+      actorUserId,
+      "deal_addons",
+      `${a.dealId}:${a.addonId}`,
+      "delete",
+      a,
+    );
+  }
+
+  const deliverablesToDelete = await db
+    .select()
+    .from(dealDeliverables)
+    .where(eq(dealDeliverables.dealId, dealId))
+    .all();
+  await db
+    .delete(dealDeliverables)
+    .where(eq(dealDeliverables.dealId, dealId))
+    .run();
+  for (const d of deliverablesToDelete) {
+    await logAudit(actorUserId, "deal_deliverables", d.id, "delete", d);
+  }
+
+  // Detach touchpoints so company history survives; deal_id is nullable.
+  const touchpointsToDetach = await db
+    .select()
+    .from(touchpoints)
+    .where(eq(touchpoints.dealId, dealId))
+    .all();
+  await db
+    .update(touchpoints)
+    .set({ dealId: null })
+    .where(eq(touchpoints.dealId, dealId))
+    .run();
+  for (const t of touchpointsToDetach) {
+    await logAudit(actorUserId, "touchpoints", t.id, "update", {
+      ...t,
+      dealId: null,
+    });
   }
 
   await db.delete(deals).where(eq(deals.id, dealId)).run();
@@ -1527,10 +1621,42 @@ export async function logTouchpoint(
       row.dealId,
       row.direction as TouchpointDirection,
       actorUserId,
+      row.channel as TouchpointChannel,
     );
   }
 
   return row;
+}
+
+export interface UpdateTouchpointInput {
+  dealId?: number | null;
+  contactId?: number | null;
+  channel?: TouchpointChannel;
+  direction?: TouchpointDirection;
+  occurredAt?: string;
+  summary?: string | null;
+  outcome?: string | null;
+  deckVersionId?: number | null;
+}
+
+/**
+ * Correct an already-logged touchpoint. Unlike logTouchpoint this never
+ * advances a cadence: the touch was counted when it was first logged, and
+ * fixing a typo on it must not push the sequence forward a second time.
+ */
+export async function updateTouchpoint(
+  id: number,
+  input: UpdateTouchpointInput,
+  actorUserId: number | null = null,
+): Promise<Touchpoint | null> {
+  const row = await db
+    .update(touchpoints)
+    .set(input)
+    .where(eq(touchpoints.id, id))
+    .returning()
+    .get();
+  if (row) await logAudit(actorUserId, "touchpoints", row.id, "update", row);
+  return row ?? null;
 }
 
 export async function listTouchpoints(companyId: number): Promise<TouchpointDetail[]> {
@@ -5537,6 +5663,955 @@ export async function dismissInboxMessage(
 }
 
 // ===========================================================================
+// Contact inbox (scraped contacts awaiting keep/reject triage)
+// ===========================================================================
+
+export interface ContactInboxIngestResult {
+  /** rows newly staged as pending */
+  added: number;
+  /** rows skipped because their dedupe key already exists (any status) */
+  duplicates: number;
+}
+
+/**
+ * Stage scraped people into the contact inbox as pending rows, deduped on the
+ * natural key (normalized LinkedIn URL, else name|company). Rows whose key is
+ * already present - pending or decided - are skipped, so re-pasting an
+ * overlapping scrape is a no-op and rejected people never resurface.
+ */
+export async function ingestContactInbox(
+  people: ScrapedPerson[],
+  meta: { source?: string | null; scrapedAt?: string | null } = {},
+  actorUserId: number | null = null,
+): Promise<ContactInboxIngestResult> {
+  await ensureMigrated();
+  if (!people.length) return { added: 0, duplicates: 0 };
+
+  // Dedupe within the batch first so the result counts are exact.
+  const byKey = new Map<string, ScrapedPerson>();
+  for (const p of people) {
+    const key = contactInboxDedupeKey(p);
+    if (!byKey.has(key)) byKey.set(key, p);
+  }
+
+  const now = nowIso();
+  const values = [...byKey.entries()].map(([dedupeKey, p]) => ({
+    dedupeKey,
+    name: p.name,
+    title: p.title,
+    companyName: p.company,
+    linkedin: p.linkedin,
+    apolloId: p.apolloId,
+    source: meta.source ?? "apollo",
+    scrapedAt: meta.scrapedAt ?? null,
+    status: "pending" as ContactInboxStatus,
+    createdAt: now,
+  }));
+
+  const inserted = await db
+    .insert(contactInbox)
+    .values(values)
+    .onConflictDoNothing({ target: contactInbox.dedupeKey })
+    .returning()
+    .all();
+  for (const row of inserted) {
+    await logAudit(actorUserId, "contact_inbox", row.id, "insert", row);
+  }
+  return {
+    added: inserted.length,
+    duplicates: people.length - inserted.length,
+  };
+}
+
+export async function listContactInbox(
+  status?: ContactInboxStatus,
+): Promise<ContactInboxRow[]> {
+  await ensureMigrated();
+  return await db
+    .select()
+    .from(contactInbox)
+    .where(status ? eq(contactInbox.status, status) : undefined)
+    .orderBy(asc(contactInbox.id))
+    .all();
+}
+
+/** Company ids that have at least one deal in the rejected stage (any cycle). */
+export async function companyIdsWithRejectedDeals(): Promise<Set<number>> {
+  const rows = await db
+    .selectDistinct({ companyId: deals.companyId })
+    .from(deals)
+    .where(eq(deals.stage, "rejected"))
+    .all();
+  return new Set(rows.map((r) => r.companyId));
+}
+
+/**
+ * Current-cycle deal stage per company (latest deal wins when a company has
+ * more than one). Lets the triage card warn "active deal in conversation"
+ * before a keep crosses wires with an in-flight thread.
+ */
+export async function currentCycleDealStageByCompany(): Promise<
+  Map<number, DealStage>
+> {
+  const cycle = await getCurrentCycle();
+  const rows = await db
+    .select({ companyId: deals.companyId, stage: deals.stage })
+    .from(deals)
+    .where(eq(deals.cycle, cycle))
+    .orderBy(asc(deals.createdAt))
+    .all();
+  const byCompany = new Map<number, DealStage>();
+  for (const r of rows) byCompany.set(r.companyId, r.stage as DealStage);
+  return byCompany;
+}
+
+export interface KeepContactResult {
+  row: ContactInboxRow;
+  contactId: number;
+  companyId: number;
+  companyName: string;
+  /** true when no company matched and one was created */
+  createdCompany: boolean;
+  /** true when a prospect deal was opened for a created company */
+  createdDeal: boolean;
+  /** true when an existing contact matched instead of creating a duplicate */
+  reusedContact: boolean;
+}
+
+/**
+ * Keep a pending inbox row: attach it to the company it names and create the
+ * real contact.
+ *
+ *   - Company match is on normalized name. When nothing matches, a new company
+ *     is created (source cold_research) with a prospect-stage deal in the
+ *     current cycle - a kept contact at a brand-new company IS a net-new
+ *     prospect. An existing company's deals are never touched, so keeping a
+ *     contact at a company with a rejected deal adds the person without
+ *     re-arming the company (the rejected-stage rule).
+ *   - If the company already has a contact with the same LinkedIn profile or
+ *     the same name, that contact is reused instead of duplicated.
+ *   - Campus-facing titles get category university_relations; others stay null.
+ *
+ * Returns null when the row is missing, not pending, or names no company.
+ */
+export async function keepInboxContact(
+  inboxId: number,
+  actorUserId: number | null = null,
+): Promise<KeepContactResult | null> {
+  const row = await db
+    .select()
+    .from(contactInbox)
+    .where(eq(contactInbox.id, inboxId))
+    .get();
+  if (!row || row.status !== "pending" || !row.companyName) return null;
+
+  let company = await findCompanyByNormalizedName(row.companyName);
+  let createdCompany = false;
+  let createdDeal = false;
+  if (!company) {
+    company = await createCompany(
+      { name: row.companyName, type: "corporate", source: "cold_research" },
+      actorUserId,
+    );
+    createdCompany = true;
+    await createDeal(
+      { companyId: company.id, cycle: await getCurrentCycle(), stage: "prospect" },
+      actorUserId,
+    );
+    createdDeal = true;
+  }
+
+  // Reuse an existing contact on this company rather than duplicating.
+  const companyContacts = await db
+    .select()
+    .from(contacts)
+    .where(eq(contacts.companyId, company.id))
+    .all();
+  const linkedinKey = row.linkedin?.toLowerCase().replace(/\/+$/, "") ?? null;
+  const existing = companyContacts.find(
+    (c) =>
+      (linkedinKey &&
+        c.linkedin &&
+        c.linkedin.toLowerCase().replace(/\/+$/, "") === linkedinKey) ||
+      c.name.toLowerCase() === row.name.toLowerCase(),
+  );
+
+  let contactId: number;
+  if (existing) {
+    contactId = existing.id;
+  } else {
+    const campusFacing = suggestTriage(row.title)?.suggestion === "keep";
+    const contact = await createContact(
+      {
+        companyId: company.id,
+        name: row.name,
+        role: row.title,
+        linkedin: row.linkedin,
+        sourcedFrom: row.source,
+        category: campusFacing ? "university_relations" : null,
+      },
+      actorUserId,
+    );
+    contactId = contact.id;
+  }
+
+  const updated = await db
+    .update(contactInbox)
+    .set({
+      status: "kept",
+      contactId,
+      companyId: company.id,
+      decidedAt: nowIso(),
+      decisionKind: "keep",
+    })
+    .where(eq(contactInbox.id, inboxId))
+    .returning()
+    .get();
+  await logAudit(actorUserId, "contact_inbox", inboxId, "update", updated);
+
+  return {
+    row: updated,
+    contactId,
+    companyId: company.id,
+    companyName: company.name,
+    createdCompany,
+    createdDeal,
+    reusedContact: !!existing,
+  };
+}
+
+/** Name of the seeded LinkedIn cadence used by "Keep + DM'd" triage. */
+export const LINKEDIN_CADENCE_NAME = "LinkedIn outreach";
+
+/**
+ * Find-or-create the LinkedIn outreach cadence: max two LinkedIn touches, then
+ * switch channels to email (a third DM is spam; if two didn't land the channel
+ * is the problem, not the timing). Step 1 IS the intro DM - "Keep + DM'd"
+ * assigns the cadence with the step index already past it.
+ */
+async function ensureLinkedinCadence(
+  actorUserId: number | null,
+): Promise<number> {
+  const existing = await db
+    .select()
+    .from(cadences)
+    .where(eq(cadences.name, LINKEDIN_CADENCE_NAME))
+    .get();
+  if (existing) return existing.id;
+
+  const cadence = await createCadence(
+    {
+      name: LINKEDIN_CADENCE_NAME,
+      description:
+        "Cold LinkedIn DM sequence: intro DM (step 1, logged by triage's Keep + DM'd), one bump ~a week later (connection acceptance lags), then switch to email rather than sending a third DM.",
+    },
+    actorUserId,
+  );
+  await setCadenceSteps(
+    cadence.id,
+    [
+      { position: 1, waitDays: 0, channel: "linkedin", note: "intro DM" },
+      {
+        position: 2,
+        waitDays: 6,
+        channel: "linkedin",
+        note: "one polite bump / check connection accepted",
+      },
+      {
+        position: 3,
+        waitDays: 7,
+        channel: "email",
+        note: "switch channels: email referencing the DM",
+      },
+      { position: 4, waitDays: 8, channel: "email", note: "final follow-up" },
+    ],
+    actorUserId,
+  );
+  return cadence.id;
+}
+
+export interface KeepAndMessageResult extends KeepContactResult {
+  dealId: number;
+  /** true when the deal moved (or was created) into the outreach stage */
+  advancedToOutreach: boolean;
+  /** true when the LinkedIn cadence was assigned (deal had none) */
+  assignedCadence: boolean;
+  /** due date of the scheduled follow-up action, when one was created */
+  followUpDue: string | null;
+}
+
+export interface KeepAndMessageOptions {
+  touchType?: LinkedinTouchType;
+  note?: string | null;
+}
+
+function linkedinTouchSummary(
+  name: string,
+  touchType: LinkedinTouchType,
+  note?: string | null,
+): string {
+  const action =
+    touchType === "connection_request"
+      ? "LinkedIn connection request"
+      : "LinkedIn intro DM";
+  return `${action} to ${name} (from triage)${note ? ` - ${note}` : ""}`;
+}
+
+/**
+ * Keep a pending inbox row AND record that a LinkedIn DM was just sent (the
+ * triage "M" decision - contact verified on LinkedIn and messaged then and
+ * there). On top of keepInboxContact():
+ *
+ *   1. Ensure a current-cycle deal exists (created at prospect by keep for
+ *      net-new companies; created here for existing companies without one).
+ *   2. Assign the LinkedIn cadence when the deal has none, with the step index
+ *      already past step 1 - the DM IS step 1, so the engine schedules the
+ *      +6d bump, not a "send the DM" action for a DM already sent.
+ *   3. Log the outbound linkedin touchpoint (this runs the cadence engine,
+ *      which schedules the next step's action).
+ *   4. Nudge the stage forward to outreach - AFTER the cadence action exists,
+ *      so armNextActionForStage sees an open action and never duplicates.
+ *      Deals already at outreach or beyond are never regressed.
+ */
+export async function keepAndMessageInboxContact(
+  inboxId: number,
+  actorUserId: number | null = null,
+  options: KeepAndMessageOptions = {},
+): Promise<KeepAndMessageResult | null> {
+  const candidate = await db
+    .select({ status: contactInbox.status, companyName: contactInbox.companyName })
+    .from(contactInbox)
+    .where(eq(contactInbox.id, inboxId))
+    .get();
+  if (!candidate || candidate.status !== "pending" || !candidate.companyName) {
+    return null;
+  }
+
+  const linkedinCadenceId = await ensureLinkedinCadence(actorUserId);
+  const cycle = await getCurrentCycle();
+  const touchType = options.touchType ?? "dm";
+  const note = options.note?.trim() || null;
+
+  return db.transaction(async (tx) => {
+    const row = await tx
+      .select()
+      .from(contactInbox)
+      .where(eq(contactInbox.id, inboxId))
+      .get();
+    if (!row || row.status !== "pending" || !row.companyName) return null;
+
+    let company =
+      (await tx
+        .select()
+        .from(companies)
+        .where(
+          eq(companies.normalizedName, normalizeCompanyName(row.companyName)),
+        )
+        .get()) ?? null;
+    let createdCompany = false;
+    let createdDeal = false;
+    if (!company) {
+      company = await tx
+        .insert(companies)
+        .values({
+          name: row.companyName,
+          normalizedName: normalizeCompanyName(row.companyName),
+          type: "corporate",
+          priority: "medium",
+          source: "cold_research",
+        })
+        .returning()
+        .get();
+      await logAudit(
+        actorUserId,
+        "companies",
+        company.id,
+        "insert",
+        company,
+        tx,
+      );
+      createdCompany = true;
+    }
+
+    const companyContacts = await tx
+      .select()
+      .from(contacts)
+      .where(eq(contacts.companyId, company.id))
+      .all();
+    const linkedinKey = row.linkedin?.toLowerCase().replace(/\/+$/, "") ?? null;
+    const existing = companyContacts.find(
+      (contact) =>
+        (linkedinKey &&
+          contact.linkedin &&
+          contact.linkedin.toLowerCase().replace(/\/+$/, "") === linkedinKey) ||
+        contact.name.toLowerCase() === row.name.toLowerCase(),
+    );
+    let contactId = existing?.id ?? null;
+    if (contactId == null) {
+      const campusFacing = suggestTriage(row.title)?.suggestion === "keep";
+      const contact = await tx
+        .insert(contacts)
+        .values({
+          companyId: company.id,
+          name: row.name,
+          role: row.title,
+          linkedin: row.linkedin,
+          sourcedFrom: row.source,
+          warmth: "cold",
+          contactType: "unknown",
+          category: campusFacing ? "university_relations" : null,
+        })
+        .returning()
+        .get();
+      await logAudit(
+        actorUserId,
+        "contacts",
+        contact.id,
+        "insert",
+        contact,
+        tx,
+      );
+      contactId = contact.id;
+    }
+
+    let deal =
+      (await tx
+        .select()
+        .from(deals)
+        .where(and(eq(deals.companyId, company.id), eq(deals.cycle, cycle)))
+        .orderBy(desc(deals.createdAt))
+        .get()) ?? null;
+    if (!deal) {
+      const at = nowIso();
+      deal = await tx
+        .insert(deals)
+        .values({
+          companyId: company.id,
+          cycle,
+          stage: "prospect",
+          cadenceStepIndex: 0,
+          stageEnteredAt: at,
+          createdAt: at,
+        })
+        .returning()
+        .get();
+      await logAudit(actorUserId, "deals", deal.id, "insert", deal, tx);
+      await recordStageEvent(
+        deal.id,
+        null,
+        "prospect",
+        tx,
+        at,
+        actorUserId,
+      );
+      createdDeal = true;
+    }
+
+    const openBefore = await tx
+      .select({ id: nextActions.id })
+      .from(nextActions)
+      .where(
+        and(
+          eq(nextActions.dealId, deal.id),
+          eq(nextActions.status, "open"),
+        ),
+      )
+      .all();
+    const openBeforeIds = new Set(openBefore.map((action) => action.id));
+
+    const previousCadenceStepIndex =
+      deal.cadenceId === linkedinCadenceId ? deal.cadenceStepIndex : null;
+    let assignedCadence = false;
+    if (deal.cadenceId == null) {
+      const updated = await tx
+        .update(deals)
+        .set({ cadenceId: linkedinCadenceId, cadenceStepIndex: 1 })
+        .where(eq(deals.id, deal.id))
+        .returning()
+        .get();
+      await logAudit(actorUserId, "deals", deal.id, "update", updated, tx);
+      deal = updated;
+      assignedCadence = true;
+    } else if (
+      deal.cadenceId === linkedinCadenceId &&
+      deal.cadenceStepIndex === 0
+    ) {
+      // The triage touch is cadence step 1, so schedule step 2 next.
+      const updated = await tx
+        .update(deals)
+        .set({ cadenceStepIndex: 1 })
+        .where(eq(deals.id, deal.id))
+        .returning()
+        .get();
+      await logAudit(actorUserId, "deals", deal.id, "update", updated, tx);
+      deal = updated;
+    }
+
+    const touchpoint = await tx
+      .insert(touchpoints)
+      .values({
+        companyId: company.id,
+        dealId: deal.id,
+        contactId,
+        channel: "linkedin",
+        direction: "outbound",
+        occurredAt: nowIso(),
+        summary: linkedinTouchSummary(row.name, touchType, note),
+      })
+      .returning()
+      .get();
+    await logAudit(
+      actorUserId,
+      "touchpoints",
+      touchpoint.id,
+      "insert",
+      touchpoint,
+      tx,
+    );
+    await advanceCadenceAfterTouchpoint(
+      deal.id,
+      "outbound",
+      actorUserId,
+      "linkedin",
+      tx,
+    );
+
+    let advancedToOutreach = false;
+    const previousStage = deal.stage as DealStage;
+    const currentIdx = STAGE_ORDER.indexOf(previousStage);
+    const outreachIdx = STAGE_ORDER.indexOf("outreach");
+    if (currentIdx !== -1 && currentIdx < outreachIdx) {
+      const at = nowIso();
+      const updated = await tx
+        .update(deals)
+        .set({ stage: "outreach", stageEnteredAt: at })
+        .where(eq(deals.id, deal.id))
+        .returning()
+        .get();
+      await logAudit(actorUserId, "deals", deal.id, "update", updated, tx);
+      await recordStageEvent(
+        deal.id,
+        previousStage,
+        "outreach",
+        tx,
+        at,
+        actorUserId,
+      );
+      await armNextActionForStage(deal.id, "outreach", tx, actorUserId);
+      advancedToOutreach = true;
+    }
+
+    const openAfter = await tx
+      .select()
+      .from(nextActions)
+      .where(
+        and(
+          eq(nextActions.dealId, deal.id),
+          eq(nextActions.status, "open"),
+        ),
+      )
+      .orderBy(desc(nextActions.id))
+      .all();
+    const triageAction =
+      openAfter.find((action) => !openBeforeIds.has(action.id)) ?? null;
+    const followUp =
+      openAfter.find((action) => action.createdBy === "cadence") ?? null;
+
+    const updatedRow = await tx
+      .update(contactInbox)
+      .set({
+        status: "kept",
+        contactId,
+        companyId: company.id,
+        decidedAt: nowIso(),
+        decisionKind: "linkedin",
+        triageTouchpointId: touchpoint.id,
+        triageDealId: deal.id,
+        triageAssignedCadence: assignedCadence,
+        triagePreviousCadenceStepIndex: previousCadenceStepIndex,
+        triagePreviousStage: advancedToOutreach ? previousStage : null,
+        triageNextActionId: triageAction?.id ?? null,
+        linkedinTouchType: touchType,
+        linkedinNote: note,
+      })
+      .where(
+        and(eq(contactInbox.id, inboxId), eq(contactInbox.status, "pending")),
+      )
+      .returning()
+      .get();
+    if (!updatedRow) throw new Error("Triage row changed during decision");
+    await logAudit(
+      actorUserId,
+      "contact_inbox",
+      updatedRow.id,
+      "update",
+      updatedRow,
+      tx,
+    );
+
+    return {
+      row: updatedRow,
+      contactId,
+      companyId: company.id,
+      companyName: company.name,
+      createdCompany,
+      createdDeal,
+      reusedContact: !!existing,
+      dealId: deal.id,
+      advancedToOutreach,
+      assignedCadence,
+      followUpDue: followUp?.dueDate ?? null,
+    };
+  });
+}
+
+/** Correct the type or optional note on a LinkedIn touch created from triage. */
+export async function updateTriageLinkedinTouch(
+  inboxId: number,
+  touchType: LinkedinTouchType,
+  note: string | null,
+  actorUserId: number | null = null,
+): Promise<ContactInboxRow | null> {
+  const cleanNote = note?.trim() || null;
+  return db.transaction(async (tx) => {
+    const row = await tx
+      .select()
+      .from(contactInbox)
+      .where(eq(contactInbox.id, inboxId))
+      .get();
+    if (
+      !row ||
+      row.status !== "kept" ||
+      row.decisionKind !== "linkedin" ||
+      row.triageTouchpointId == null
+    ) {
+      return null;
+    }
+
+    const touchpoint = await tx
+      .update(touchpoints)
+      .set({
+        summary: linkedinTouchSummary(row.name, touchType, cleanNote),
+      })
+      .where(eq(touchpoints.id, row.triageTouchpointId))
+      .returning()
+      .get();
+    if (!touchpoint) return null;
+    await logAudit(
+      actorUserId,
+      "touchpoints",
+      touchpoint.id,
+      "update",
+      touchpoint,
+      tx,
+    );
+
+    const updated = await tx
+      .update(contactInbox)
+      .set({ linkedinTouchType: touchType, linkedinNote: cleanNote })
+      .where(eq(contactInbox.id, inboxId))
+      .returning()
+      .get();
+    await logAudit(
+      actorUserId,
+      "contact_inbox",
+      updated.id,
+      "update",
+      updated,
+      tx,
+    );
+    return updated;
+  });
+}
+
+/**
+ * Undo only the outreach portion of Keep + LinkedIn. The contact stays kept.
+ * If no later touch exists, also remove the triage-created action and restore
+ * the prior cadence/stage. Later work is never rolled back.
+ */
+export async function undoTriageLinkedinTouch(
+  inboxId: number,
+  actorUserId: number | null = null,
+): Promise<ContactInboxRow | null> {
+  return db.transaction(async (tx) => {
+    const row = await tx
+      .select()
+      .from(contactInbox)
+      .where(eq(contactInbox.id, inboxId))
+      .get();
+    if (
+      !row ||
+      row.status !== "kept" ||
+      row.decisionKind !== "linkedin" ||
+      row.triageTouchpointId == null
+    ) {
+      return null;
+    }
+
+    const laterTouch =
+      row.triageDealId == null
+        ? null
+        : await tx
+            .select({ id: touchpoints.id })
+            .from(touchpoints)
+            .where(
+              and(
+                eq(touchpoints.dealId, row.triageDealId),
+                gt(touchpoints.id, row.triageTouchpointId),
+              ),
+            )
+            .get();
+
+    const updated = await tx
+      .update(contactInbox)
+      .set({
+        decisionKind: "keep",
+        triageTouchpointId: null,
+        triageDealId: null,
+        triageAssignedCadence: null,
+        triagePreviousCadenceStepIndex: null,
+        triagePreviousStage: null,
+        triageNextActionId: null,
+        linkedinTouchType: null,
+        linkedinNote: null,
+      })
+      .where(eq(contactInbox.id, inboxId))
+      .returning()
+      .get();
+    await logAudit(
+      actorUserId,
+      "contact_inbox",
+      updated.id,
+      "update",
+      updated,
+      tx,
+    );
+
+    const touchpoint = await tx
+      .select()
+      .from(touchpoints)
+      .where(eq(touchpoints.id, row.triageTouchpointId))
+      .get();
+    if (touchpoint) {
+      await tx
+        .delete(touchpoints)
+        .where(eq(touchpoints.id, touchpoint.id))
+        .run();
+      await logAudit(
+        actorUserId,
+        "touchpoints",
+        touchpoint.id,
+        "delete",
+        touchpoint,
+        tx,
+      );
+    }
+
+    let canRestoreDeal = !laterTouch;
+    if (!laterTouch && row.triageNextActionId != null) {
+      const action = await tx
+        .select()
+        .from(nextActions)
+        .where(
+          and(
+            eq(nextActions.id, row.triageNextActionId),
+            eq(nextActions.status, "open"),
+          ),
+        )
+        .get();
+      if (action) {
+        await tx
+          .delete(nextActions)
+          .where(eq(nextActions.id, action.id))
+          .run();
+        await logAudit(
+          actorUserId,
+          "next_actions",
+          action.id,
+          "delete",
+          action,
+          tx,
+        );
+      } else {
+        // A completed/deleted follow-up is later work. Remove the exact touch,
+        // but do not rewind the deal underneath that work.
+        canRestoreDeal = false;
+      }
+    }
+
+    if (canRestoreDeal && row.triageDealId != null) {
+      const deal = await tx
+        .select()
+        .from(deals)
+        .where(eq(deals.id, row.triageDealId))
+        .get();
+      if (deal) {
+        const linkedinCadence = await tx
+          .select({ id: cadences.id })
+          .from(cadences)
+          .where(eq(cadences.name, LINKEDIN_CADENCE_NAME))
+          .get();
+        const patch: Partial<Deal> = {};
+        if (
+          row.triageAssignedCadence &&
+          deal.cadenceId === linkedinCadence?.id
+        ) {
+          patch.cadenceId = null;
+          patch.cadenceStepIndex = 0;
+        } else if (
+          row.triagePreviousCadenceStepIndex != null &&
+          deal.cadenceId === linkedinCadence?.id
+        ) {
+          patch.cadenceStepIndex = row.triagePreviousCadenceStepIndex;
+        }
+        if (
+          row.triagePreviousStage &&
+          deal.stage === "outreach" &&
+          STAGE_ORDER.includes(row.triagePreviousStage as DealStage)
+        ) {
+          patch.stage = row.triagePreviousStage as DealStage;
+          patch.stageEnteredAt = nowIso();
+          const event = await tx
+            .select()
+            .from(stageEvents)
+            .where(
+              and(
+                eq(stageEvents.dealId, deal.id),
+                eq(stageEvents.fromStage, row.triagePreviousStage),
+                eq(stageEvents.toStage, "outreach"),
+              ),
+            )
+            .orderBy(desc(stageEvents.id))
+            .get();
+          if (event) {
+            await tx
+              .delete(stageEvents)
+              .where(eq(stageEvents.id, event.id))
+              .run();
+            await logAudit(
+              actorUserId,
+              "stage_events",
+              event.id,
+              "delete",
+              event,
+              tx,
+            );
+          }
+        }
+        if (Object.keys(patch).length > 0) {
+          const restored = await tx
+            .update(deals)
+            .set(patch)
+            .where(eq(deals.id, deal.id))
+            .returning()
+            .get();
+          await logAudit(
+            actorUserId,
+            "deals",
+            restored.id,
+            "update",
+            restored,
+            tx,
+          );
+        }
+      }
+    }
+
+    return updated;
+  });
+}
+
+/** Reject a pending inbox row with a structured reason. */
+export async function rejectInboxContact(
+  inboxId: number,
+  reason: string,
+  actorUserId: number | null = null,
+): Promise<ContactInboxRow | null> {
+  const row = await db
+    .update(contactInbox)
+    .set({
+      status: "rejected",
+      rejectReason: normalizeRejectReason(reason),
+      decidedAt: nowIso(),
+    })
+    .where(
+      and(eq(contactInbox.id, inboxId), eq(contactInbox.status, "pending")),
+    )
+    .returning()
+    .get();
+  if (row) await logAudit(actorUserId, "contact_inbox", row.id, "update", row);
+  return row ?? null;
+}
+
+/**
+ * Send a rejected row back to pending (undo a misclick). Kept rows cannot be
+ * reopened - the created contact/company would be orphaned; remove the contact
+ * from its company page instead.
+ */
+export async function reopenInboxContact(
+  inboxId: number,
+  actorUserId: number | null = null,
+): Promise<ContactInboxRow | null> {
+  const row = await db
+    .update(contactInbox)
+    .set({ status: "pending", rejectReason: null, decidedAt: null })
+    .where(
+      and(eq(contactInbox.id, inboxId), eq(contactInbox.status, "rejected")),
+    )
+    .returning()
+    .get();
+  if (row) await logAudit(actorUserId, "contact_inbox", row.id, "update", row);
+  return row ?? null;
+}
+
+// ===========================================================================
+// Discord bot heartbeat
+// ===========================================================================
+
+/**
+ * Record a bot check-in. Deliberately writes the settings row directly instead
+ * of going through setSetting(): this fires every few minutes forever, and an
+ * audit row per beat would bury real edits under thousands of heartbeats.
+ */
+export async function recordBotHeartbeat(
+  beat: Omit<BotHeartbeat, "at"> & { at?: string },
+): Promise<BotHeartbeat> {
+  const full: BotHeartbeat = { ...beat, at: beat.at ?? nowIso() };
+  await db
+    .insert(settings)
+    .values({ key: DISCORD_BOT_HEARTBEAT_KEY, value: JSON.stringify(full) })
+    .onConflictDoUpdate({
+      target: settings.key,
+      set: { value: JSON.stringify(full) },
+    })
+    .run();
+  return full;
+}
+
+/** The bot's last check-in, or null if it has never run against this database. */
+export async function getBotHeartbeat(): Promise<BotHeartbeat | null> {
+  return parseBotHeartbeat(await getSetting(DISCORD_BOT_HEARTBEAT_KEY));
+}
+
+/** The app-side pause switch, or null if it has never been toggled. */
+export async function getBotPause(): Promise<BotPause | null> {
+  return parseBotPause(await getSetting(DISCORD_BOT_PAUSE_KEY));
+}
+
+/**
+ * Flip the bot's pause switch. Goes through setSetting so the flip lands in the
+ * audit log - unlike heartbeats this is a rare, deliberate act worth recording.
+ */
+export async function setBotPaused(
+  paused: boolean,
+  actorUserId: number | null = null,
+): Promise<BotPause> {
+  const pause: BotPause = { paused, at: nowIso() };
+  await setSetting(DISCORD_BOT_PAUSE_KEY, JSON.stringify(pause), actorUserId);
+  return pause;
+}
+
+// ===========================================================================
 // Users (login accounts)
 // ===========================================================================
 
@@ -5556,6 +6631,7 @@ export interface CreateUserInput {
   passwordHash: string;
   name?: string | null;
   role?: UserRole;
+  discordUserId?: string | null;
 }
 
 /** Admin-provisioned account creation (see scripts/create-user.ts). */
@@ -5570,11 +6646,50 @@ export async function createUser(
       passwordHash: input.passwordHash,
       name: input.name ?? null,
       role: input.role ?? "member",
+      discordUserId: input.discordUserId ?? null,
     })
     .returning()
     .get();
   await logAudit(actorUserId, "users", row.id, "insert", row);
   return row;
+}
+
+/**
+ * Link (or unlink, with `discordUserId: null`) a Discord snowflake to an
+ * existing account (see scripts/link-discord-user.ts). This is what lets the
+ * Discord bot resolve `/log` and `/prospect` invocations back to a real user
+ * for audit attribution instead of logging them as null/"system".
+ */
+export async function setUserDiscordId(
+  userId: number,
+  discordUserId: string | null,
+  actorUserId: number | null = null,
+): Promise<User | null> {
+  const row = await db
+    .update(users)
+    .set({ discordUserId })
+    .where(eq(users.id, userId))
+    .returning()
+    .get();
+  if (row) await logAudit(actorUserId, "users", row.id, "update", row);
+  return row ?? null;
+}
+
+/**
+ * Resolve a Discord snowflake (interaction.user.id) to an app user id, so the
+ * Discord bot can attribute its mutations to a real person. Returns null for
+ * an unlinked Discord account - callers should fall back to null (system)
+ * attribution rather than failing the command.
+ */
+export async function getUserIdByDiscordId(
+  discordUserId: string,
+): Promise<number | null> {
+  const row = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.discordUserId, discordUserId))
+    .get();
+  return row?.id ?? null;
 }
 
 // ===========================================================================
@@ -5594,9 +6709,10 @@ export async function logAudit(
   rowId: string | number,
   action: AuditAction,
   state: unknown,
+  executor: Pick<DataExecutor, "insert"> = db,
 ): Promise<void> {
   const json = state == null ? null : JSON.stringify(state);
-  await db.insert(auditLog).values({
+  await executor.insert(auditLog).values({
     userId: actorUserId,
     tableName,
     rowId: String(rowId),

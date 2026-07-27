@@ -9,7 +9,7 @@ import { backfillV9ContactData } from "./contact-backfill";
  * The highest schema version this build knows how to produce. Every step in
  * migrate() up to and including this number is applied in order.
  */
-export const LATEST_SCHEMA_VERSION = 13;
+export const LATEST_SCHEMA_VERSION = 16;
 
 /**
  * Reads the applied schema version from a dedicated schema_version table
@@ -94,6 +94,14 @@ async function addColumnIfMissing(
  *   version 12 = audit_log (who changed what, for after-the-fact review).
  *   version 13 = next_actions.owner (free-text owner name; the Discord bot maps
  *                owner names to Discord user IDs for digest @-mentions).
+ *   version 14 = contact_inbox (scraped contacts awaiting keep/reject triage,
+ *                deduped on a natural key so re-scrapes never resurface
+ *                already-decided people).
+ *   version 15 = correction metadata for triage-created LinkedIn touches.
+ *   version 16 = users.discord_user_id (nullable, unique linked Discord
+ *                snowflake). Lets the Discord bot resolve the invoking user
+ *                back to an app account so /log and /prospect attribute audit
+ *                rows to a real person instead of null.
  */
 export async function migrate(client: Client): Promise<void> {
   const startVersion = await getSchemaVersion(client);
@@ -136,6 +144,15 @@ export async function migrate(client: Client): Promise<void> {
   }
   if (startVersion < 13) {
     await migrateToV13(client);
+  }
+  if (startVersion < 14) {
+    await migrateToV14(client);
+  }
+  if (startVersion < 15) {
+    await migrateToV15(client);
+  }
+  if (startVersion < 16) {
+    await migrateToV16(client);
   }
 
   if (startVersion < LATEST_SCHEMA_VERSION) {
@@ -608,4 +625,102 @@ async function migrateToV12(client: Client): Promise<void> {
  */
 async function migrateToV13(client: Client): Promise<void> {
   await addColumnIfMissing(client, "next_actions", "owner", "TEXT");
+}
+
+/**
+ * Version 14 - contact_inbox, the staging table for scraped contacts (Apollo
+ * screen scrapes pasted into /triage). Rows are deduped on dedupe_key (the
+ * normalized LinkedIn URL, else "name|company" lowercased) so re-pasting an
+ * overlapping scrape is a no-op, and decided rows (kept/rejected) never
+ * resurface as pending. Uses CREATE TABLE IF NOT EXISTS so re-running is a
+ * no-op. Non-destructive.
+ */
+async function migrateToV14(client: Client): Promise<void> {
+  await client.executeMultiple(`
+    CREATE TABLE IF NOT EXISTS contact_inbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      title TEXT,
+      company_name TEXT,
+      linkedin TEXT,
+      apollo_id TEXT,
+      source TEXT NOT NULL DEFAULT 'apollo',
+      scraped_at TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      reject_reason TEXT,
+      contact_id INTEGER REFERENCES contacts(id),
+      company_id INTEGER REFERENCES companies(id),
+      decided_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contact_inbox_status
+      ON contact_inbox(status);
+  `);
+}
+
+/**
+ * Version 15 - link a kept inbox row to the LinkedIn touch, deal, cadence
+ * action, and prior stage created by Keep + DM'd. This lets the history UI edit
+ * or safely undo that outreach without guessing from summary text.
+ */
+async function migrateToV15(client: Client): Promise<void> {
+  await addColumnIfMissing(client, "contact_inbox", "decision_kind", "TEXT");
+  await addColumnIfMissing(
+    client,
+    "contact_inbox",
+    "triage_touchpoint_id",
+    "INTEGER REFERENCES touchpoints(id)",
+  );
+  await addColumnIfMissing(
+    client,
+    "contact_inbox",
+    "triage_deal_id",
+    "INTEGER REFERENCES deals(id)",
+  );
+  await addColumnIfMissing(
+    client,
+    "contact_inbox",
+    "triage_assigned_cadence",
+    "INTEGER",
+  );
+  await addColumnIfMissing(
+    client,
+    "contact_inbox",
+    "triage_previous_cadence_step_index",
+    "INTEGER",
+  );
+  await addColumnIfMissing(
+    client,
+    "contact_inbox",
+    "triage_previous_stage",
+    "TEXT",
+  );
+  await addColumnIfMissing(
+    client,
+    "contact_inbox",
+    "triage_next_action_id",
+    "INTEGER REFERENCES next_actions(id)",
+  );
+  await addColumnIfMissing(
+    client,
+    "contact_inbox",
+    "linkedin_touch_type",
+    "TEXT",
+  );
+  await addColumnIfMissing(client, "contact_inbox", "linkedin_note", "TEXT");
+}
+
+/**
+ * Version 16 - users.discord_user_id, a nullable, unique linked Discord
+ * snowflake set via `npm run link-discord-user`. Guarded ALTER so re-running
+ * is a no-op; existing rows inherit NULL. Non-destructive.
+ */
+async function migrateToV16(client: Client): Promise<void> {
+  await addColumnIfMissing(client, "users", "discord_user_id", "TEXT");
+  await client.executeMultiple(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord_user_id
+      ON users(discord_user_id) WHERE discord_user_id IS NOT NULL;
+  `);
 }

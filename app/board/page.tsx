@@ -7,6 +7,7 @@ import {
   type DealWithCompany,
   type StaleSeverity,
 } from "@/lib/data";
+import Link from "next/link";
 import type { DealStage } from "@/lib/schema";
 import { PageHeader } from "@/components/page-header";
 import { Badge } from "@/components/ui/badge";
@@ -284,9 +285,12 @@ function DealCard({
   return (
     <article className="flex flex-col gap-2 rounded-lg border border-border bg-card p-3 shadow-[0_1px_2px_rgba(28,55,32,0.04)]">
       <div className="flex items-baseline justify-between gap-2">
-        <span className="font-semibold leading-tight text-foreground">
+        <Link
+          href={`/companies/${deal.company.id}`}
+          className="font-semibold leading-tight text-foreground underline-offset-4 hover:underline"
+        >
           {deal.company.name}
-        </span>
+        </Link>
         <span className="whitespace-nowrap font-display font-bold text-primary dark:text-foreground">
           {formatDollars(deal.askAmount)}
         </span>

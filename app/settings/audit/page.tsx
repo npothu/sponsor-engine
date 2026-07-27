@@ -1,3 +1,5 @@
+import { redirect } from "next/navigation";
+import { auth } from "@/auth";
 import { listRecentAuditLog } from "@/lib/data";
 import { PageHeader } from "@/components/page-header";
 import { Card } from "@/components/ui/card";
@@ -19,6 +21,11 @@ function formatTimestamp(iso: string): string {
 }
 
 export default async function AuditLogPage() {
+  const session = await auth();
+  if (session?.user?.role !== "admin") {
+    redirect("/");
+  }
+
   const entries = await listRecentAuditLog(200);
 
   return (

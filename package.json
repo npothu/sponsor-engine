@@ -12,7 +12,8 @@
     "seed": "tsx --conditions=react-server scripts/seed.ts",
     "backup": "node scripts/backup.mjs",
     "reset-prospects": "tsx --conditions=react-server scripts/reset-prospects.ts",
-    "create-user": "tsx --conditions=react-server scripts/create-user.ts"
+    "create-user": "tsx --conditions=react-server scripts/create-user.ts",
+    "link-discord-user": "tsx --conditions=react-server scripts/link-discord-user.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",
