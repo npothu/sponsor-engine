@@ -16,10 +16,10 @@ describe("parseScrapePayload()", () => {
         count: 2,
         people: [
           {
-            name: "Rachel Groenewald",
+            name: "Priya Venkat",
             title: "Talent Sourcing Specialist",
-            company: "The Home Depot",
-            linkedin: "http://www.linkedin.com/in/rachel-groenewald",
+            company: "Northgate Supply Co.",
+            linkedin: "http://www.linkedin.com/in/priya-venkat-fake",
           },
           { name: "Jordan Foster", title: "Intern", company: "IBM", linkedin: null },
         ],
@@ -29,10 +29,10 @@ describe("parseScrapePayload()", () => {
     expect(parsed!.people).toHaveLength(2);
     expect(parsed!.scrapedAt).toBe("2026-07-26T16:08:09.477Z");
     expect(parsed!.people[0]).toEqual({
-      name: "Rachel Groenewald",
+      name: "Priya Venkat",
       title: "Talent Sourcing Specialist",
-      company: "The Home Depot",
-      linkedin: "http://www.linkedin.com/in/rachel-groenewald",
+      company: "Northgate Supply Co.",
+      linkedin: "http://www.linkedin.com/in/priya-venkat-fake",
       apolloId: null,
     });
   });
@@ -62,8 +62,8 @@ describe("parseScrapePayload()", () => {
 describe("normalizeLinkedinUrl()", () => {
   it("strips protocol, www, query, and trailing slash", () => {
     expect(
-      normalizeLinkedinUrl("http://www.linkedin.com/in/Rachel-Groenewald/?x=1"),
-    ).toBe("linkedin.com/in/rachel-groenewald");
+      normalizeLinkedinUrl("http://www.linkedin.com/in/Priya-Venkat-Fake/?x=1"),
+    ).toBe("linkedin.com/in/priya-venkat-fake");
     expect(normalizeLinkedinUrl("https://linkedin.com/in/obsmith")).toBe(
       "linkedin.com/in/obsmith",
     );
@@ -80,11 +80,11 @@ describe("contactInboxDedupeKey()", () => {
   it("prefers the normalized LinkedIn URL", () => {
     expect(
       contactInboxDedupeKey({
-        name: "Rachel",
-        company: "Home Depot",
-        linkedin: "http://www.linkedin.com/in/rachel-groenewald",
+        name: "Priya",
+        company: "Northgate Supply Co.",
+        linkedin: "http://www.linkedin.com/in/priya-venkat-fake",
       }),
-    ).toBe("linkedin.com/in/rachel-groenewald");
+    ).toBe("linkedin.com/in/priya-venkat-fake");
   });
 
   it("falls back to name|company lowercased", () => {
