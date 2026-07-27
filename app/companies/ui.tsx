@@ -409,6 +409,18 @@ export function todayInputValue(): string {
   return local.toISOString().slice(0, 10);
 }
 
+/**
+ * Local YYYY-MM-DDTHH:mm for datetime-local inputs, defaulting to now. Used
+ * where the stored timestamp carries a meaningful time of day, so round-tripping
+ * a row through an edit form does not silently reset it to midnight.
+ */
+export function dateTimeInputValue(iso?: string | null): string {
+  const d = iso ? new Date(iso) : new Date();
+  if (Number.isNaN(d.getTime())) return dateTimeInputValue();
+  const off = d.getTimezoneOffset();
+  return new Date(d.getTime() - off * 60_000).toISOString().slice(0, 16);
+}
+
 /** Relative-day helper: negative = overdue, 0 = today. */
 export function dueTone(dueDate: string): "overdue" | "today" | "future" {
   const due = new Date(dueDate + "T00:00:00");

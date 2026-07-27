@@ -539,6 +539,85 @@ export const discordInbox = sqliteTable("discord_inbox", {
 });
 
 // ---------------------------------------------------------------------------
+// Contact inbox (scraped contacts awaiting keep/reject triage)
+// ---------------------------------------------------------------------------
+
+/** contact_inbox.status allowed values */
+export type ContactInboxStatus = "pending" | "kept" | "rejected";
+export type LinkedinTouchType = "dm" | "connection_request";
+
+/**
+ * contact_inbox.rejectReason allowed values - why a scraped contact was
+ * rejected during triage. Captured so recurring patterns (e.g. a persona that
+ * keeps yielding interns) can tighten the upstream scrape filters, and so
+ * re-scraped rejects stay suppressed instead of resurfacing as new.
+ */
+export type ContactInboxRejectReason =
+  | "intern"
+  | "no_campus_presence"
+  | "remote_only"
+  | "wrong_location"
+  | "duplicate"
+  | "other";
+
+export const contactInbox = sqliteTable("contact_inbox", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  /** natural dedupe key: normalized LinkedIn URL, else "name|company" lowercased */
+  dedupeKey: text("dedupe_key").notNull().unique(),
+  name: text("name").notNull(),
+  /** job title as scraped (nullable) */
+  title: text("title"),
+  /** company name as scraped; matched to a companies row at keep time */
+  companyName: text("company_name"),
+  linkedin: text("linkedin"),
+  /** Apollo person id when the scrape captured it (nullable) */
+  apolloId: text("apollo_id"),
+  /** where the row came from, e.g. 'apollo' */
+  source: text("source").notNull().default("apollo"),
+  /** ISO timestamp of the scrape run that produced this row */
+  scrapedAt: text("scraped_at"),
+  /** 'pending' | 'kept' | 'rejected' */
+  status: text("status").notNull().default("pending"),
+  /** why it was rejected (nullable; see ContactInboxRejectReason) */
+  rejectReason: text("reject_reason"),
+  /** contact created from this row on keep (nullable) */
+  contactId: integer("contact_id").references(() => contacts.id),
+  /** company the kept contact was attached to (nullable) */
+  companyId: integer("company_id").references(() => companies.id),
+  /** ISO timestamp of the keep/reject decision (nullable while pending) */
+  decidedAt: text("decided_at"),
+  /** triage decision refinement: plain keep or keep + LinkedIn touch */
+  decisionKind: text("decision_kind"),
+  /** the exact touchpoint created by keep + LinkedIn, for safe correction */
+  triageTouchpointId: integer("triage_touchpoint_id").references(
+    () => touchpoints.id,
+  ),
+  /** deal changed by keep + LinkedIn, retained for undo/correction */
+  triageDealId: integer("triage_deal_id").references(() => deals.id),
+  /** whether triage assigned the LinkedIn cadence to this deal */
+  triageAssignedCadence: integer("triage_assigned_cadence", {
+    mode: "boolean",
+  }),
+  /** cadence cursor before triage advanced a pre-assigned LinkedIn cadence */
+  triagePreviousCadenceStepIndex: integer(
+    "triage_previous_cadence_step_index",
+  ),
+  /** deal stage before triage nudged it to outreach */
+  triagePreviousStage: text("triage_previous_stage"),
+  /** action scheduled by triage's LinkedIn cadence */
+  triageNextActionId: integer("triage_next_action_id").references(
+    () => nextActions.id,
+  ),
+  /** LinkedIn DM vs connection request */
+  linkedinTouchType: text("linkedin_touch_type"),
+  /** optional context for the LinkedIn touch */
+  linkedinNote: text("linkedin_note"),
+  createdAt: text("created_at")
+    .notNull()
+    .default(sql`(CURRENT_TIMESTAMP)`),
+});
+
+// ---------------------------------------------------------------------------
 // Users (login accounts - admin-provisioned, no public signup)
 // ---------------------------------------------------------------------------
 
@@ -552,6 +631,8 @@ export const users = sqliteTable("users", {
   name: text("name"),
   /** 'admin' | 'member' */
   role: text("role").notNull().default("member"),
+  /** linked Discord snowflake, so bot-driven mutations attribute to this user instead of null */
+  discordUserId: text("discord_user_id").unique(),
   createdAt: text("created_at")
     .notNull()
     .default(sql`(CURRENT_TIMESTAMP)`),
@@ -642,6 +723,9 @@ export type NewCompanySignal = typeof companySignals.$inferInsert;
 
 export type DiscordInboxMessage = typeof discordInbox.$inferSelect;
 export type NewDiscordInboxMessage = typeof discordInbox.$inferInsert;
+
+export type ContactInboxRow = typeof contactInbox.$inferSelect;
+export type NewContactInboxRow = typeof contactInbox.$inferInsert;
 
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;

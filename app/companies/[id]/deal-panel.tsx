@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useTransition } from "react";
+import { X } from "lucide-react";
 import type { Addon, Contact, Tier } from "@/lib/schema";
 import type { DealWithTier } from "@/lib/data";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,7 @@ import {
   setDealAddonsAction,
   setDealSatisfactionAction,
   recycleDealAction,
+  removeDealFromCycleAction,
 } from "../actions";
 
 /**
@@ -51,6 +53,7 @@ export function DealPanel({
   selectedAddonIds: number[];
 }) {
   const [editing, setEditing] = useState(false);
+  const [pendingRemove, startRemove] = useTransition();
   // Track the stage selection so a move to 'lapsed' can prompt for a loss reason
   // inline before submitting (the reason is what powers next-cycle re-approach).
   const [stage, setStage] = useState(deal.stage);
@@ -59,6 +62,21 @@ export function DealPanel({
   const [lostReason, setLostReason] = useState(deal.lostReason ?? "");
   const selected = new Set(selectedAddonIds);
   const offersReAsk = lostReason === "timing" || lostReason === "budget";
+
+  function removeFromCycle() {
+    if (pendingRemove) return;
+    if (
+      !window.confirm(
+        `Remove this company from the ${deal.cycle} cycle? This deletes the ${deal.stage} deal.`,
+      )
+    ) {
+      return;
+    }
+    const fd = new FormData();
+    fd.set("companyId", String(companyId));
+    fd.set("dealId", String(deal.id));
+    startRemove(() => removeDealFromCycleAction(fd));
+  }
 
   return (
     <Card>
@@ -77,6 +95,18 @@ export function DealPanel({
             onClick={() => setEditing((v) => !v)}
           >
             {editing ? "Done" : "Edit terms"}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={pendingRemove}
+            onClick={removeFromCycle}
+            aria-label={`Remove from ${deal.cycle}`}
+            title={`Remove from ${deal.cycle}`}
+            className="text-muted-foreground hover:text-destructive"
+          >
+            <X className="size-4" />
           </Button>
         </div>
       </CardHeader>

@@ -10,12 +10,11 @@
  */
 import { eq, inArray } from "drizzle-orm";
 import { db, ensureMigrated } from "../lib/db";
+import { createDeal, removeDealFromCycle } from "../lib/data";
 import {
   companies,
   companySignals,
   deals,
-  nextActions,
-  stageEvents,
   tiers,
   settings,
 } from "../lib/schema";
@@ -50,14 +49,13 @@ async function main(): Promise<void> {
 
   console.log(`Found ${prospectDealIds.length} prospect deal(s) to remove.`);
 
+  for (const dealId of prospectDealIds) {
+    // null actorUserId: this is an unattended maintenance script, not a
+    // logged-in request - logs as "system / importer" in the audit trail,
+    // same convention as the JSON importers.
+    await removeDealFromCycle(dealId, null);
+  }
   if (prospectDealIds.length > 0) {
-    await db
-      .delete(nextActions)
-      .where(inArray(nextActions.dealId, prospectDealIds));
-    await db
-      .delete(stageEvents)
-      .where(inArray(stageEvents.dealId, prospectDealIds));
-    await db.delete(deals).where(inArray(deals.id, prospectDealIds));
     console.log("Deleted prospect deals and their next_actions/stage_events.");
   }
 
@@ -105,11 +103,11 @@ async function main(): Promise<void> {
 
   // Signal fit scores
   const SIGNAL_WEIGHTS: Record<string, number> = {
-    hires_gt_interns: 3,
+    hires_our_students: 3,
     sponsors_peer_orgs: 2,
     has_ur_budget: 2,
     warm_path: 3,
-    asian_erg: 1,
+    erg_or_community_presence: 1,
     prior_org_contact: 2,
   };
   const TOTAL_WEIGHT = Object.values(SIGNAL_WEIGHTS).reduce((s, w) => s + w, 0); // 13
@@ -186,16 +184,16 @@ async function main(): Promise<void> {
   // 4. Create prospect deals for top 50
   // ---------------------------------------------------------------------------
 
-  const now = new Date().toISOString();
-
   for (const company of top50) {
-    await db.insert(deals).values({
-      companyId: company.id,
-      cycle: CYCLE,
-      stage: "prospect",
-      stageEnteredAt: now,
-      createdAt: now,
-    });
+    // null actorUserId: see the delete loop above for why.
+    await createDeal(
+      {
+        companyId: company.id,
+        cycle: CYCLE,
+        stage: "prospect",
+      },
+      null,
+    );
   }
 
   console.log(

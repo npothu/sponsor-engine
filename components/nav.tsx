@@ -9,6 +9,8 @@ import { cn } from "@/lib/utils";
 export interface NavItem {
   href: string;
   label: string;
+  /** Restrict this item to a single role; omit for everyone. */
+  requiresRole?: "admin";
 }
 
 /** A labeled group of navigation items. */
@@ -31,6 +33,7 @@ export const NAV_SECTIONS: NavSection[] = [
   {
     label: "Outreach",
     items: [
+      { href: "/triage", label: "Triage" },
       { href: "/backfill", label: "Backfill" },
       { href: "/templates", label: "Templates" },
       { href: "/cadences", label: "Cadences" },
@@ -53,7 +56,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { href: "/report", label: "Report" },
       { href: "/handoff", label: "Handoff" },
       { href: "/settings/general", label: "Settings" },
-      { href: "/settings/audit", label: "Audit Log" },
+      { href: "/settings/audit", label: "Audit Log", requiresRole: "admin" },
     ],
   },
 ];
@@ -66,11 +69,17 @@ function isActive(pathname: string, href: string): boolean {
   return pathname === href || pathname.startsWith(href + "/");
 }
 
-export function SidebarNav() {
+export function SidebarNav({ role }: { role?: string }) {
   const pathname = usePathname();
+  const sections = NAV_SECTIONS.map((section) => ({
+    ...section,
+    items: section.items.filter(
+      (item) => !item.requiresRole || item.requiresRole === role,
+    ),
+  })).filter((section) => section.items.length > 0);
   return (
     <nav className="flex flex-col gap-4">
-      {NAV_SECTIONS.map((section) => (
+      {sections.map((section) => (
         <div key={section.label} className="flex flex-col gap-0.5">
           <div className="mb-1 px-3.5 text-[10.5px] font-bold uppercase tracking-[0.08em] text-muted-foreground/80">
             {section.label}

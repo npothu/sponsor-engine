@@ -1,0 +1,61 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        font: 13px/1.5 system-ui, sans-serif;
+        width: 260px;
+        margin: 0;
+        padding: 12px;
+        background: #fdfbf5;
+        color: #1d2b23;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0 0 8px;
+      }
+      button {
+        display: block;
+        width: 100%;
+        margin: 6px 0;
+        padding: 7px 10px;
+        border: 1px solid #2f5d46;
+        border-radius: 6px;
+        background: #2f5d46;
+        color: #fdfbf5;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: transparent;
+        color: #2f5d46;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      #status {
+        min-height: 18px;
+        margin-top: 8px;
+        color: #4a5c52;
+      }
+      #downloads {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Apollo People Scraper</h1>
+    <button id="scrape-page">Scrape this page</button>
+    <button id="scrape-all">Scrape all pages</button>
+    <div id="downloads">
+      <button id="copy-json">Copy JSON for Triage</button>
+      <button id="dl-json" class="secondary">Download JSON</button>
+      <button id="dl-csv" class="secondary">Download CSV</button>
+    </div>
+    <div id="status"></div>
+    <script src="csv.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

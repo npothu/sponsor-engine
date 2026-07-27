@@ -8,10 +8,12 @@ import {
   createDeal,
   updateDeal,
   updateDealStage,
+  removeDealFromCycle,
   createContact,
   updateContact,
   deleteContact,
   logTouchpoint,
+  updateTouchpoint,
   logReplyForDeal,
   createNextAction,
   completeNextAction,
@@ -152,6 +154,25 @@ export async function createDealAction(formData: FormData): Promise<void> {
     actorUserId,
   );
   revalidatePath(`/companies/${companyId}`);
+  revalidatePath("/board");
+}
+
+/**
+ * Remove a deal from its cycle on the company profile (Other cycles / primary
+ * deal). Allowed at any stage - this is an explicit membership removal, not the
+ * prospect-pool cleanup path.
+ */
+export async function removeDealFromCycleAction(
+  formData: FormData,
+): Promise<void> {
+  const companyId = nullableId(formData.get("companyId"));
+  const dealId = nullableId(formData.get("dealId"));
+  if (dealId == null) return;
+  const actorUserId = await currentUserId();
+  await removeDealFromCycle(dealId, actorUserId);
+  if (companyId != null) revalidatePath(`/companies/${companyId}`);
+  revalidatePath("/companies");
+  revalidatePath("/prospects");
   revalidatePath("/board");
 }
 
@@ -437,6 +458,34 @@ export async function logTouchpointAction(formData: FormData): Promise<void> {
     actorUserId,
   );
   revalidatePath(`/companies/${companyId}`);
+  revalidatePath("/companies");
+  revalidatePath("/board");
+}
+
+export async function updateTouchpointAction(
+  formData: FormData,
+): Promise<void> {
+  const companyId = nullableId(formData.get("companyId"));
+  const touchpointId = nullableId(formData.get("touchpointId"));
+  if (touchpointId == null) return;
+  const occurred = str(formData.get("occurredAt"));
+  const actorUserId = await currentUserId();
+  await updateTouchpoint(
+    touchpointId,
+    {
+      dealId: nullableId(formData.get("dealId")),
+      contactId: nullableId(formData.get("contactId")),
+      channel: (str(formData.get("channel")) as TouchpointChannel) || undefined,
+      direction:
+        (str(formData.get("direction")) as TouchpointDirection) || undefined,
+      occurredAt: occurred ? new Date(occurred).toISOString() : undefined,
+      summary: nullableStr(formData.get("summary")),
+      outcome: nullableStr(formData.get("outcome")),
+      deckVersionId: nullableId(formData.get("deckVersionId")),
+    },
+    actorUserId,
+  );
+  if (companyId != null) revalidatePath(`/companies/${companyId}`);
   revalidatePath("/companies");
   revalidatePath("/board");
 }

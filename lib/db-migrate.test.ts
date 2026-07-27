@@ -45,6 +45,24 @@ describe("migrate()", () => {
       expect(await columnExists(client, "companies", "host")).toBe(true);
       expect(await columnExists(client, "companies", "normalized_name")).toBe(true);
     }
+    if (version >= 15) {
+      expect(
+        await columnExists(client, "contact_inbox", "triage_touchpoint_id"),
+      ).toBe(true);
+      expect(
+        await columnExists(client, "contact_inbox", "linkedin_touch_type"),
+      ).toBe(true);
+      expect(
+        await columnExists(
+          client,
+          "contact_inbox",
+          "triage_previous_cadence_step_index",
+        ),
+      ).toBe(true);
+      expect(await columnExists(client, "contact_inbox", "linkedin_note")).toBe(
+        true,
+      );
+    }
 
     client.close();
   });

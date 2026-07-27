@@ -6,6 +6,15 @@ import { HistorySection } from "./history-section";
 import { PageHeader, SectionHeading } from "@/components/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 
+/**
+ * Everything on this page is written by the bot, a separate process the app
+ * never hears from: captured messages and the status heartbeat both arrive in
+ * the database with no request and no revalidatePath() to invalidate a cached
+ * render. Prerendered, this page served build-time state forever - which is how
+ * a running bot came to be reported as "Not configured" in production.
+ */
+export const dynamic = "force-dynamic";
+
 export default async function DiscordPage() {
   const pending = await listDiscordInbox("pending");
   const attached = await listDiscordInbox("attached");
@@ -16,7 +25,7 @@ export default async function DiscordPage() {
     return av < bv ? 1 : av > bv ? -1 : 0;
   });
   const companies = await listCompanies();
-  const status = readBotStatus();
+  const status = await readBotStatus();
 
   return (
     <div>

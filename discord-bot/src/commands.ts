@@ -287,18 +287,25 @@ export interface LogArgs {
   summary: string | null;
 }
 
-export async function runLog(data: DataLayer, args: LogArgs): Promise<string> {
+export async function runLog(
+  data: DataLayer,
+  args: LogArgs,
+  actorUserId: number | null,
+): Promise<string> {
   const companies = await data.listCompanies();
   const company = companies.find((c) => c.id === args.companyId);
   if (!company) {
     return `Could not find a company with id ${args.companyId}.`;
   }
-  await data.logTouchpoint({
-    companyId: args.companyId,
-    channel: args.channel,
-    direction: args.direction,
-    summary: args.summary,
-  });
+  await data.logTouchpoint(
+    {
+      companyId: args.companyId,
+      channel: args.channel,
+      direction: args.direction,
+      summary: args.summary,
+    },
+    actorUserId,
+  );
   const dir = args.direction === "inbound" ? "inbound" : "outbound";
   return `Logged ${dir} ${args.channel} touchpoint for **${company.name}**.`;
 }
@@ -318,6 +325,7 @@ export interface ProspectArgs {
 export async function runProspect(
   data: DataLayer,
   args: ProspectArgs,
+  actorUserId: number | null,
 ): Promise<string> {
   const byName = await data.findCompanyByNormalizedName(args.name);
   const existing = byName ?? (await data.findCompanyByHost(args.website));
@@ -328,18 +336,24 @@ export async function runProspect(
     );
   }
 
-  const company = await data.createCompany({
-    name: args.name,
-    website: args.website,
-    priority: args.priority ?? undefined,
-    notes: args.notes,
-    source: "discord",
-  });
-  await data.createDeal({
-    companyId: company.id,
-    cycle: await data.getCurrentCycle(),
-    stage: "prospect",
-  });
+  const company = await data.createCompany(
+    {
+      name: args.name,
+      website: args.website,
+      priority: args.priority ?? undefined,
+      notes: args.notes,
+      source: "discord",
+    },
+    actorUserId,
+  );
+  await data.createDeal(
+    {
+      companyId: company.id,
+      cycle: await data.getCurrentCycle(),
+      stage: "prospect",
+    },
+    actorUserId,
+  );
 
   const priority = args.priority ?? company.priority;
   const website = args.website?.trim() ? ` · ${args.website.trim()}` : "";

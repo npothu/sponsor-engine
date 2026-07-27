@@ -4,9 +4,22 @@ import { revalidatePath } from "next/cache";
 import {
   attachInboxMessageToCompany,
   dismissInboxMessage,
+  setBotPaused,
   triageInboxMessageToDeal,
 } from "@/lib/data";
 import { currentUserId } from "@/lib/auth-context";
+
+/**
+ * Flip the bot's pause switch from the web app. The bot itself may run on a
+ * different machine entirely - it notices the flip through the shared database
+ * within about half a minute (see isBotPaused in discord-bot/bot.ts).
+ */
+export async function setBotPausedAction(formData: FormData): Promise<void> {
+  const paused = formData.get("paused") === "1";
+  const actorUserId = await currentUserId();
+  await setBotPaused(paused, actorUserId);
+  revalidatePath("/discord");
+}
 
 export async function attachInboxMessageAction(formData: FormData): Promise<void> {
   const inboxId = Number(formData.get("inboxId"));
