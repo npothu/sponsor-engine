@@ -45,6 +45,25 @@ npm run create-user -- --email you@example.com --name "Your Name" --role admin
 The command prints a generated password once and stores only a bcrypt hash.
 Set `AUTH_SECRET` in `.env.local` before first login (`npx auth secret` generates one).
 
+## Deploy your own (Vercel + Turso)
+
+The hosted setup is one database and three environment variables:
+
+1. **Fork this repo** (forking rather than cloning keeps updates easy - see [Staying up to date](#staying-up-to-date)).
+2. **Create a database** with the [Turso CLI](https://docs.turso.tech/cli):
+
+   ```bash
+   turso db create sponsor-engine && turso db show sponsor-engine --url && turso db tokens create sponsor-engine
+   ```
+
+3. **Import the fork at [vercel.com/new](https://vercel.com/new)** and set three environment variables: `turso_url` and `turso_auth_token` from step 2, and `AUTH_SECRET` (generate with `npx auth secret`). Deploy.
+   There is no migration step - the schema creates and migrates itself on first request.
+4. **Create your login**: clone your fork locally, put the same three variables in `.env.local`, and run the `create-user` command from [Authentication](#authentication).
+5. **Make it yours in the app**: set your org's name and goals under **Settings -> General**, then tiers, templates, and cadences.
+   Skip `npm run seed` here - it writes fictional demo data, which you don't want in a real deployment.
+
+No Vercel or Turso account? Everything also runs fully local with zero configuration - that's the Quickstart above.
+
 ## What's in it
 
 - **Pipeline** - deals move through outreach, conversation, pitched, negotiating, committed, fulfilling, renewed, lapsed, and rejected.
@@ -103,6 +122,24 @@ Most branding lives in settings rather than code, but a few things are worth edi
 - `lib/data.ts` - `SIGNAL_CATALOG` defines the fit signals you score prospects on, and `PERSONALIZATION_HOOKS` maps each one to outreach copy.
 - `app/prospects/sources.ts` - `SOURCE_CATALOG` lists where prospects come from.
 - `lib/contact-backfill.ts` - `ALUMNI_PATTERN` should match how your contacts refer to your school.
+
+## Staying up to date
+
+If you forked, updates are ordinary merges - GitHub's **Sync fork** button handles the no-conflict case, or from a local checkout:
+
+```bash
+git remote add upstream https://github.com/npothu/sponsor-engine.git
+```
+
+```bash
+git fetch upstream && git merge upstream/main
+```
+
+Prefer hands-off? This repo ships `.github/workflows/upstream-sync.yml`: enable Actions on your fork (GitHub disables them until you do) and it opens an "upstream-sync" PR in your fork whenever this repo gains commits, weekly. You review and merge; nothing lands unattended.
+
+If you created your copy with **Use this template** instead of forking, its history is unrelated to this repo's, so the *first* merge needs `git fetch upstream && git merge upstream/main --allow-unrelated-histories`. Every sync after that behaves like the fork case.
+
+Updates stay conflict-free as long as your customizations live in **Settings and the database** rather than the source tree. If you do edit source (see [Adapting it to your org](#adapting-it-to-your-org)), keep those edits small and expect the occasional conflict in exactly those files.
 
 ## License
 
