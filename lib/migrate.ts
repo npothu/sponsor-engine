@@ -9,7 +9,7 @@ import { backfillV9ContactData } from "./contact-backfill";
  * The highest schema version this build knows how to produce. Every step in
  * migrate() up to and including this number is applied in order.
  */
-export const LATEST_SCHEMA_VERSION = 16;
+export const LATEST_SCHEMA_VERSION = 17;
 
 /**
  * Reads the applied schema version from a dedicated schema_version table
@@ -102,6 +102,9 @@ async function addColumnIfMissing(
  *                snowflake). Lets the Discord bot resolve the invoking user
  *                back to an app account so /log and /prospect attribute audit
  *                rows to a real person instead of null.
+ *   version 17 = contact_inbox.triage_created_contact, so undoing a keep knows
+ *                whether the contact was created by that keep (safe to remove)
+ *                or an existing one it reused (must be left alone).
  */
 export async function migrate(client: Client): Promise<void> {
   const startVersion = await getSchemaVersion(client);
@@ -153,6 +156,9 @@ export async function migrate(client: Client): Promise<void> {
   }
   if (startVersion < 16) {
     await migrateToV16(client);
+  }
+  if (startVersion < 17) {
+    await migrateToV17(client);
   }
 
   if (startVersion < LATEST_SCHEMA_VERSION) {
@@ -723,4 +729,20 @@ async function migrateToV16(client: Client): Promise<void> {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord_user_id
       ON users(discord_user_id) WHERE discord_user_id IS NOT NULL;
   `);
+}
+
+/**
+ * Version 17 - contact_inbox.triage_created_contact: 1 when the keep created
+ * the contact, 0 when it reused one that already existed on the company. Undo
+ * keep only removes contacts it knows triage created. Rows decided before this
+ * column existed stay NULL and are treated as "unknown, leave the contact".
+ * Guarded ALTER so re-running is a no-op. Non-destructive.
+ */
+async function migrateToV17(client: Client): Promise<void> {
+  await addColumnIfMissing(
+    client,
+    "contact_inbox",
+    "triage_created_contact",
+    "INTEGER",
+  );
 }

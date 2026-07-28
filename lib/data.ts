@@ -860,12 +860,44 @@ export async function updateContact(
   return row ?? null;
 }
 
+/**
+ * Delete a contact, detaching everything that points at it first.
+ *
+ * touchpoints.contact_id and contact_inbox.contact_id are real foreign keys, so
+ * a bare DELETE fails with SQLITE_CONSTRAINT for any contact that has ever been
+ * logged against or triaged in - which is most of them. The history outlives the
+ * link: touchpoints stay on the company (just anonymized), inbox rows keep their
+ * kept/rejected decision, and the referral/champion pointers (plain columns, but
+ * dangling all the same) are cleared.
+ */
 export async function deleteContact(
   id: number,
   actorUserId: number | null = null,
 ): Promise<void> {
   const before = await db.select().from(contacts).where(eq(contacts.id, id)).get();
-  await db.delete(contacts).where(eq(contacts.id, id)).run();
+  await db.transaction(async (tx) => {
+    await tx
+      .update(touchpoints)
+      .set({ contactId: null })
+      .where(eq(touchpoints.contactId, id))
+      .run();
+    await tx
+      .update(contactInbox)
+      .set({ contactId: null })
+      .where(eq(contactInbox.contactId, id))
+      .run();
+    await tx
+      .update(contacts)
+      .set({ referredByContactId: null })
+      .where(eq(contacts.referredByContactId, id))
+      .run();
+    await tx
+      .update(deals)
+      .set({ championContactId: null })
+      .where(eq(deals.championContactId, id))
+      .run();
+    await tx.delete(contacts).where(eq(contacts.id, id)).run();
+  });
   await logAudit(actorUserId, "contacts", id, "delete", before ?? null);
 }
 
@@ -5735,6 +5767,37 @@ export async function listContactInbox(
     .all();
 }
 
+/**
+ * Contact count per company, for the triage card's "has a contact" bubble and
+ * the "no contact yet" filter. Companies with zero contacts are simply absent
+ * from the map - callers default to 0.
+ */
+export async function contactCountByCompany(): Promise<Map<number, number>> {
+  const rows = await db
+    .select({
+      companyId: contacts.companyId,
+      contactCount: sql<number>`count(*)`.as("contact_count"),
+    })
+    .from(contacts)
+    .groupBy(contacts.companyId)
+    .all();
+  return new Map(rows.map((r) => [r.companyId, Number(r.contactCount)]));
+}
+
+/**
+ * Company ids someone has already reached out to - at least one OUTBOUND
+ * touchpoint. Inbound-only companies (they contacted us) still count as
+ * un-reached, since the triage question is "have we sent anything yet".
+ */
+export async function companyIdsWithOutboundTouch(): Promise<Set<number>> {
+  const rows = await db
+    .selectDistinct({ companyId: touchpoints.companyId })
+    .from(touchpoints)
+    .where(eq(touchpoints.direction, "outbound"))
+    .all();
+  return new Set(rows.map((r) => r.companyId));
+}
+
 /** Company ids that have at least one deal in the rejected stage (any cycle). */
 export async function companyIdsWithRejectedDeals(): Promise<Set<number>> {
   const rows = await db
@@ -5863,6 +5926,7 @@ export async function keepInboxContact(
       companyId: company.id,
       decidedAt: nowIso(),
       decisionKind: "keep",
+      triageCreatedContact: !existing,
     })
     .where(eq(contactInbox.id, inboxId))
     .returning()
@@ -6225,6 +6289,7 @@ export async function keepAndMessageInboxContact(
         companyId: company.id,
         decidedAt: nowIso(),
         decisionKind: "linkedin",
+        triageCreatedContact: !existing,
         triageTouchpointId: touchpoint.id,
         triageDealId: deal.id,
         triageAssignedCadence: assignedCadence,
@@ -6543,10 +6608,137 @@ export async function rejectInboxContact(
   return row ?? null;
 }
 
+export interface UndoKeepResult {
+  row: ContactInboxRow;
+  /** true when the contact this keep created was removed with it */
+  removedContact: boolean;
+  /** set when a contact was left behind, explaining why (for the feedback line) */
+  keptContactBecause: "reused" | "unknown_origin" | "has_history" | null;
+}
+
 /**
- * Send a rejected row back to pending (undo a misclick). Kept rows cannot be
- * reopened - the created contact/company would be orphaned; remove the contact
- * from its company page instead.
+ * Undo a keep: send the row back to pending and remove the contact that keep
+ * created. Refuses while the row still carries a triage LinkedIn touch - undo
+ * the outreach first, so the touchpoint/cadence/stage rollback stays in the one
+ * place that knows how to do it.
+ *
+ * The contact is only removed when triage created it (triageCreatedContact) AND
+ * nothing has since attached to it: no touchpoints, no other inbox row, not a
+ * referrer, not a deal champion. Anything else is real work, so the contact
+ * stays and the caller reports why. The company and any deal keep created are
+ * deliberately left alone - a company in the tracker with no contacts is an
+ * ordinary prospect, not debris.
+ */
+export async function undoKeepInboxContact(
+  inboxId: number,
+  actorUserId: number | null = null,
+): Promise<UndoKeepResult | null> {
+  return db.transaction(async (tx) => {
+    const row = await tx
+      .select()
+      .from(contactInbox)
+      .where(eq(contactInbox.id, inboxId))
+      .get();
+    if (!row || row.status !== "kept" || row.triageTouchpointId != null) {
+      return null;
+    }
+
+    let keptContactBecause: UndoKeepResult["keptContactBecause"] = null;
+    let doomedContact: Contact | null = null;
+    if (row.contactId != null) {
+      if (row.triageCreatedContact === false) {
+        keptContactBecause = "reused";
+      } else if (row.triageCreatedContact == null) {
+        keptContactBecause = "unknown_origin";
+      } else {
+        const [touched, otherInbox, referrer, champion] = await Promise.all([
+          tx
+            .select({ id: touchpoints.id })
+            .from(touchpoints)
+            .where(eq(touchpoints.contactId, row.contactId))
+            .get(),
+          tx
+            .select({ id: contactInbox.id })
+            .from(contactInbox)
+            .where(
+              and(
+                eq(contactInbox.contactId, row.contactId),
+                sql`${contactInbox.id} <> ${inboxId}`,
+              ),
+            )
+            .get(),
+          tx
+            .select({ id: contacts.id })
+            .from(contacts)
+            .where(eq(contacts.referredByContactId, row.contactId))
+            .get(),
+          tx
+            .select({ id: deals.id })
+            .from(deals)
+            .where(eq(deals.championContactId, row.contactId))
+            .get(),
+        ]);
+        if (touched || otherInbox || referrer || champion) {
+          keptContactBecause = "has_history";
+        } else {
+          doomedContact =
+            (await tx
+              .select()
+              .from(contacts)
+              .where(eq(contacts.id, row.contactId))
+              .get()) ?? null;
+        }
+      }
+    }
+
+    // The inbox row's own contact_id is a foreign key, so it has to let go of
+    // the contact before the contact can be deleted.
+    const updated = await tx
+      .update(contactInbox)
+      .set({
+        status: "pending",
+        contactId: null,
+        companyId: null,
+        decidedAt: null,
+        decisionKind: null,
+        rejectReason: null,
+        triageCreatedContact: null,
+      })
+      .where(eq(contactInbox.id, inboxId))
+      .returning()
+      .get();
+    await logAudit(
+      actorUserId,
+      "contact_inbox",
+      updated.id,
+      "update",
+      updated,
+      tx,
+    );
+
+    if (doomedContact) {
+      await tx.delete(contacts).where(eq(contacts.id, doomedContact.id)).run();
+      await logAudit(
+        actorUserId,
+        "contacts",
+        doomedContact.id,
+        "delete",
+        doomedContact,
+        tx,
+      );
+    }
+
+    return {
+      row: updated,
+      removedContact: doomedContact != null,
+      keptContactBecause,
+    };
+  });
+}
+
+/**
+ * Send a rejected row back to pending (undo a misclick). Kept rows go through
+ * undoKeepInboxContact() instead, which also cleans up the created contact.
  */
 export async function reopenInboxContact(
   inboxId: number,

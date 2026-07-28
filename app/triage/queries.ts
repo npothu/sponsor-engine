@@ -1,6 +1,8 @@
 import "server-only";
 import {
+  companyIdsWithOutboundTouch,
   companyIdsWithRejectedDeals,
+  contactCountByCompany,
   currentCycleDealStageByCompany,
   listCompanies,
   listContactInbox,
@@ -25,6 +27,10 @@ export interface TriagePendingRow {
   companyMatch: { id: number; name: string } | null;
   /** the matched company has a rejected deal - keep adds the contact, no deal */
   companyRejected: boolean;
+  /** contacts already on the matched company (0 for a company we'd create) */
+  companyContactCount: number;
+  /** the matched company has at least one outbound touchpoint logged */
+  companyContacted: boolean;
   /** matched company's current-cycle deal is mid-conversation or later -
    *  warn before a DM crosses wires with an in-flight thread (nullable) */
   activeDealStage: DealStage | null;
@@ -40,13 +46,21 @@ export interface TriageData {
 
 /** Load and annotate the whole triage view in one place. */
 export async function loadTriageData(): Promise<TriageData> {
-  const [rows, allCompanies, rejectedCompanyIds, dealStageByCompany] =
-    await Promise.all([
-      listContactInbox(),
-      listCompanies(),
-      companyIdsWithRejectedDeals(),
-      currentCycleDealStageByCompany(),
-    ]);
+  const [
+    rows,
+    allCompanies,
+    rejectedCompanyIds,
+    dealStageByCompany,
+    contactCounts,
+    contactedCompanyIds,
+  ] = await Promise.all([
+    listContactInbox(),
+    listCompanies(),
+    companyIdsWithRejectedDeals(),
+    currentCycleDealStageByCompany(),
+    contactCountByCompany(),
+    companyIdsWithOutboundTouch(),
+  ]);
 
   const byNormalizedName = new Map<string, { id: number; name: string }>();
   for (const c of allCompanies) {
@@ -79,6 +93,13 @@ export async function loadTriageData(): Promise<TriageData> {
       companyMatch,
       companyRejected:
         companyMatch != null && rejectedCompanyIds.has(companyMatch.id),
+      // A company we have not created yet trivially has no contacts and no
+      // outreach, so an unmatched row reads as 0 / false.
+      companyContactCount: companyMatch
+        ? (contactCounts.get(companyMatch.id) ?? 0)
+        : 0,
+      companyContacted:
+        companyMatch != null && contactedCompanyIds.has(companyMatch.id),
       activeDealStage:
         stage && IN_FLIGHT_STAGES.includes(stage) ? stage : null,
       suggestion: suggestTriage(row.title),

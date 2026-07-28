@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   reopenContactAction,
+  undoKeepContactAction,
   undoTriageLinkedinTouchAction,
   updateTriageLinkedinTouchAction,
 } from "./actions";
@@ -47,6 +48,28 @@ export function HistorySection({
     fd.set("inboxId", String(id));
     startTransition(async () => {
       await reopenContactAction(fd);
+      router.refresh();
+    });
+  }
+
+  function undoKeep(row: ContactInboxRow) {
+    const outreach =
+      row.decisionKind === "linkedin"
+        ? " Its LinkedIn touch and any triage-created follow-up go with it."
+        : "";
+    if (
+      !window.confirm(
+        `Send ${row.name} back to the pending queue? The contact this keep created is removed.${outreach}`,
+      )
+    ) {
+      return;
+    }
+    const fd = new FormData();
+    fd.set("inboxId", String(row.id));
+    startTransition(async () => {
+      const result = await undoKeepContactAction(fd);
+      setFeedback(result.summary);
+      if (result.ok) setEditingId(null);
       router.refresh();
     });
   }
@@ -131,7 +154,7 @@ export function HistorySection({
                     @ {row.companyName ?? "?"}
                   </span>
                 </span>
-                <span className="flex shrink-0 items-center gap-2">
+                <span className="flex flex-wrap items-center justify-end gap-2">
                 {row.status === "kept" ? (
                   <>
                     <Badge variant="lime">
@@ -161,6 +184,15 @@ export function HistorySection({
                         </Button>
                       </>
                     )}
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => undoKeep(row)}
+                      disabled={isPending}
+                      title="Send this row back to pending and remove the contact the keep created"
+                    >
+                      Undo keep
+                    </Button>
                     {row.companyId && (
                       <Link
                         href={`/companies/${row.companyId}`}
