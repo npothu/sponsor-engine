@@ -1,0 +1,57 @@
+# Keeps forks current: opens a PR in your fork whenever the upstream repo
+# (npothu/sponsor-engine) has new commits.
+#
+# Opt-in by design: GitHub disables workflows on forks until you enable them
+# under the fork's Actions tab. Once enabled, this runs weekly (or on demand
+# via "Run workflow") and opens/updates a single "upstream-sync" PR for you
+# to review and merge.
+#
+# If your copy was created with "Use this template" rather than a fork, the
+# histories are unrelated - do the FIRST merge locally with
+# `git merge upstream/main --allow-unrelated-histories`; every sync after
+# that behaves like a normal fork.
+name: Upstream sync
+
+on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM: https://github.com/npothu/sponsor-engine.git
+
+jobs:
+  sync:
+    # No-op on the upstream repo itself.
+    if: github.repository != 'npothu/sponsor-engine'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream and push sync branch
+        id: fetch
+        run: |
+          git remote add upstream "$UPSTREAM"
+          git fetch upstream main
+          new=$(git rev-list --count origin/main..upstream/main)
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          if [ "$new" -gt 0 ]; then
+            git push -f origin upstream/main:refs/heads/upstream-sync
+          fi
+
+      - name: Open PR if one is not already open
+        if: steps.fetch.outputs.new > 0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(gh pr list --head upstream-sync --state open --json number --jq '.[].number')" ]; then
+            gh pr create --head upstream-sync --base main \
+              --title "Sync with upstream sponsor-engine" \
+              --body "Automated PR pulling the latest commits from the upstream repo. Review and merge to stay current. If it conflicts, merge locally instead: \`git fetch upstream && git merge upstream/main\`."
+          fi

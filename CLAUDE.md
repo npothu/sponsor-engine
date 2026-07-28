@@ -15,6 +15,9 @@ corporate sponsorship (Next.js 16, React 19, Drizzle, SQLite/libSQL).
 - `npm run lint` (ESLint) and `npm run test` (Vitest) before calling anything done.
 - `discord-bot/` is a separate optional package with its own install/lockfile;
   it is not required to run or test the web app.
+- Prefer configuration over code edits when adapting the app to an org: identity,
+  tiers, templates, and cadences all live in Settings/the database. A stock source
+  tree keeps `upstream-sync` merges conflict-free for downstream forks.
 
 ## Git and GitHub
 
