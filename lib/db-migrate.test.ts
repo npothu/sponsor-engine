@@ -63,6 +63,11 @@ describe("migrate()", () => {
         true,
       );
     }
+    if (version >= 17) {
+      expect(
+        await columnExists(client, "contact_inbox", "triage_created_contact"),
+      ).toBe(true);
+    }
 
     client.close();
   });

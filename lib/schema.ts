@@ -608,6 +608,9 @@ export const contactInbox = sqliteTable("contact_inbox", {
   triageNextActionId: integer("triage_next_action_id").references(
     () => nextActions.id,
   ),
+  /** whether keep CREATED the contact (false = reused an existing one, null =
+   *  decided before this was recorded). Gates what undo-keep may remove. */
+  triageCreatedContact: integer("triage_created_contact", { mode: "boolean" }),
   /** LinkedIn DM vs connection request */
   linkedinTouchType: text("linkedin_touch_type"),
   /** optional context for the LinkedIn touch */

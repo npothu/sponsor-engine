@@ -7,6 +7,7 @@ import {
   keepInboxContact,
   rejectInboxContact,
   reopenInboxContact,
+  undoKeepInboxContact,
   undoTriageLinkedinTouch,
   updateTriageLinkedinTouch,
 } from "@/lib/data";
@@ -215,6 +216,46 @@ export async function rejectContactAction(
   if (!row) return { ok: false, summary: "Row already decided." };
   revalidatePath("/triage");
   return { ok: true, summary: `Rejected ${row.name} (${row.rejectReason})` };
+}
+
+/**
+ * Undo a keep, sending the row back to pending. A "Keep + DM'd" row rolls its
+ * LinkedIn outreach back first (touchpoint, cadence, stage, follow-up action),
+ * then drops the contact the keep created.
+ */
+export async function undoKeepContactAction(
+  formData: FormData,
+): Promise<DecisionResult> {
+  const inboxId = Number(formData.get("inboxId"));
+  if (!Number.isFinite(inboxId)) return { ok: false, summary: "Invalid row." };
+  const actorUserId = await currentUserId();
+
+  const undoneOutreach = await undoTriageLinkedinTouch(inboxId, actorUserId);
+  const result = await undoKeepInboxContact(inboxId, actorUserId);
+  if (!result) {
+    return { ok: false, summary: "Only kept rows can be undone." };
+  }
+
+  revalidatePath("/triage");
+  revalidatePath("/companies");
+  revalidatePath("/prospects");
+  revalidatePath("/board");
+  revalidatePath("/");
+
+  const outreach = undoneOutreach ? " LinkedIn outreach removed." : "";
+  const contact = result.removedContact
+    ? " Contact removed."
+    : result.keptContactBecause === "reused"
+      ? " The contact it matched was already in the tracker, so it stays."
+      : result.keptContactBecause === "has_history"
+        ? " Contact kept - it has history now; delete it from the company page if you still want it gone."
+        : result.keptContactBecause === "unknown_origin"
+          ? " Contact kept - this keep predates undo tracking; delete it from the company page if you still want it gone."
+          : "";
+  return {
+    ok: true,
+    summary: `${result.row.name} is back in the pending queue.${outreach}${contact}`,
+  };
 }
 
 /** Undo a rejection, sending the row back to pending. */

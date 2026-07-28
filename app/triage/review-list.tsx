@@ -35,9 +35,30 @@ export function ReviewList({ rows }: { rows: TriagePendingRow[] }) {
   const [lastRejectedId, setLastRejectedId] = useState<number | null>(null);
   const [companyFilter, setCompanyFilter] = useState("");
   const [sortByCompany, setSortByCompany] = useState(false);
+  const [onlyNoContact, setOnlyNoContact] = useState(false);
+  const [onlyNoOutreach, setOnlyNoOutreach] = useState(false);
   const [, startTransition] = useTransition();
+  const [seenRows, setSeenRows] = useState(rows);
   const router = useRouter();
   const activeCardRef = useRef<HTMLDivElement | null>(null);
+
+  // A decided row is hidden optimistically by id. When the server hands one
+  // back as pending - undo keep in the Decided section does exactly that - stop
+  // hiding it, and drop the stale "Kept X" line that described the decision.
+  // Adjusting state during render (rather than in an effect) so the row never
+  // paints as missing; `rows` only changes identity once a refresh lands, so
+  // this cannot fire during the optimistic window.
+  if (rows !== seenRows) {
+    setSeenRows(rows);
+    if (rows.some((r) => decidedIds.has(r.row.id))) {
+      setDecidedIds((prev) => {
+        const next = new Set(prev);
+        for (const r of rows) next.delete(r.row.id);
+        return next;
+      });
+      setFeedback(null);
+    }
+  }
 
   const undecided = useMemo(
     () => rows.filter((r) => !decidedIds.has(r.row.id)),
@@ -45,18 +66,21 @@ export function ReviewList({ rows }: { rows: TriagePendingRow[] }) {
   );
   const visible = useMemo(() => {
     const q = companyFilter.trim().toLowerCase();
-    const list = q
-      ? undecided.filter((r) =>
-          (r.row.companyName ?? "").toLowerCase().includes(q),
-        )
-      : undecided;
+    const list = undecided.filter(
+      (r) =>
+        (!q || (r.row.companyName ?? "").toLowerCase().includes(q)) &&
+        (!onlyNoContact || r.companyContactCount === 0) &&
+        (!onlyNoOutreach || !r.companyContacted),
+    );
     if (!sortByCompany) return list;
     return [...list].sort(
       (a, b) =>
         (a.row.companyName ?? "").localeCompare(b.row.companyName ?? "") ||
         a.row.id - b.row.id,
     );
-  }, [undecided, companyFilter, sortByCompany]);
+  }, [undecided, companyFilter, sortByCompany, onlyNoContact, onlyNoOutreach]);
+  const filtered =
+    companyFilter.trim() !== "" || onlyNoContact || onlyNoOutreach;
   const activeIndex = Math.max(
     0,
     visible.findIndex((r) => r.row.id === activeId),
@@ -147,10 +171,16 @@ export function ReviewList({ rows }: { rows: TriagePendingRow[] }) {
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
-      // Ignore while typing in the company filter (or any text field). SELECT is
-      // left alone so K/M/R/1-6 still fire after you pick a reject reason.
-      const tag = (e.target as HTMLElement | null)?.tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      // Ignore while typing in the company filter (or any text field). SELECT
+      // and the filter checkboxes are left alone so K/M/R/1-6 still fire after
+      // you pick a reject reason or toggle a filter.
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (
+        tag === "TEXTAREA" ||
+        (tag === "INPUT" && (el as HTMLInputElement).type !== "checkbox")
+      )
+        return;
       if (!active) return;
 
       if (e.key === "ArrowDown" || e.key === "u" || e.key === "U") move(1);
@@ -207,7 +237,27 @@ export function ReviewList({ rows }: { rows: TriagePendingRow[] }) {
           <option value="scrape">Scrape order</option>
           <option value="company">Company A-Z</option>
         </Select>
-        {companyFilter.trim() && (
+        <label className="inline-flex items-center gap-1.5 whitespace-nowrap text-sm text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={onlyNoContact}
+            onChange={(e) => setOnlyNoContact(e.target.checked)}
+            aria-label="Only companies with no contact yet"
+            className="size-4 accent-primary dark:accent-lime"
+          />
+          No contact yet
+        </label>
+        <label className="inline-flex items-center gap-1.5 whitespace-nowrap text-sm text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={onlyNoOutreach}
+            onChange={(e) => setOnlyNoOutreach(e.target.checked)}
+            aria-label="Only companies not reached out to yet"
+            className="size-4 accent-primary dark:accent-lime"
+          />
+          Not reached out yet
+        </label>
+        {filtered && (
           <span className="text-xs text-muted-foreground">
             {visible.length} of {undecided.length} pending
           </span>
@@ -236,7 +286,9 @@ export function ReviewList({ rows }: { rows: TriagePendingRow[] }) {
 
       {!visible.length && (
         <p className="text-sm text-muted-foreground">
-          No pending contacts match &ldquo;{companyFilter.trim()}&rdquo;.
+          {companyFilter.trim()
+            ? `No pending contacts match “${companyFilter.trim()}”.`
+            : "No pending contacts match the selected filters."}
         </p>
       )}
 
@@ -281,8 +333,14 @@ function ReviewCard({
   onKeepAndMessage: () => void;
   onReject: () => void;
 }) {
-  const { row, companyMatch, companyRejected, activeDealStage, suggestion } =
-    item;
+  const {
+    row,
+    companyMatch,
+    companyRejected,
+    companyContactCount,
+    activeDealStage,
+    suggestion,
+  } = item;
   return (
     <Card
       className={cn(
@@ -302,7 +360,17 @@ function ReviewCard({
             @ {row.companyName ?? "(no company)"}
           </span>
           {companyMatch ? (
-            <Badge variant="secondary">In tracker: {companyMatch.name}</Badge>
+            <>
+              <Badge variant="secondary">In tracker: {companyMatch.name}</Badge>
+              {companyContactCount > 0 ? (
+                <Badge variant="info">
+                  {companyContactCount} contact
+                  {companyContactCount === 1 ? "" : "s"}
+                </Badge>
+              ) : (
+                <Badge variant="outline">No contact yet</Badge>
+              )}
+            </>
           ) : row.companyName ? (
             <Badge>New company</Badge>
           ) : null}

@@ -210,4 +210,48 @@ describe("triage LinkedIn outreach", () => {
     expect(restoredDeal?.stage).toBe("prospect");
     expect(restoredDeal?.cadenceId).toBeNull();
   });
+
+  it("refuses to undo a keep while its LinkedIn touch is still attached", async () => {
+    const inbox = (await data.listContactInbox("kept")).find(
+      (row) => row.name === "Email Cadence Contact",
+    )!;
+    expect(inbox.triageTouchpointId).not.toBeNull();
+    expect(await data.undoKeepInboxContact(inbox.id)).toBeNull();
+  });
+
+  it("undoes the keep once the outreach is gone, leaving the company", async () => {
+    const inbox = (await data.listContactInbox("kept")).find(
+      (row) => row.name === "Atomic Contact",
+    )!;
+    const contactId = inbox.contactId!;
+    const companyId = inbox.companyId!;
+
+    const undone = await data.undoKeepInboxContact(inbox.id);
+    expect(undone?.removedContact).toBe(true);
+    expect(undone?.row.status).toBe("pending");
+    expect(undone?.row.contactId).toBeNull();
+    expect(undone?.row.companyId).toBeNull();
+
+    const removedContact = await database.db
+      .select()
+      .from(schema.contacts)
+      .where(eq(schema.contacts.id, contactId))
+      .get();
+    expect(removedContact).toBeUndefined();
+
+    // The company and its prospect deal stay - an empty company is an ordinary
+    // prospect, and removing one is a separate, deliberate act.
+    const company = await database.db
+      .select()
+      .from(schema.companies)
+      .where(eq(schema.companies.id, companyId))
+      .get();
+    expect(company?.name).toBe("Atomic Co");
+    const deal = await database.db
+      .select()
+      .from(schema.deals)
+      .where(eq(schema.deals.companyId, companyId))
+      .get();
+    expect(deal).toBeDefined();
+  });
 });
